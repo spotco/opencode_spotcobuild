@@ -8,8 +8,12 @@ import { Agent } from "@/agent/agent"
 import { Session } from "@/session/session"
 import { Permission } from "@/permission"
 import { Plugin } from "@/plugin"
+import { Config } from "@/config/config"
 
 export const CODE_MODE_TOOL = "execute"
+
+/** SpotcoBuild small-model default when config experimental.codemode.catalog_budget is unset. */
+export const DEFAULT_CATALOG_BUDGET = 1000
 
 const DESCRIPTION = "Run a confined orchestration script with access to connected MCP tools."
 
@@ -55,12 +59,17 @@ function groupByServer(mcpTools: Record<string, MCP.McpTool>, servers: readonly 
   return groups
 }
 
-export function describeCatalog(mcpTools: Record<string, MCP.McpTool>, servers: readonly string[]): string {
+export function describeCatalog(
+  mcpTools: Record<string, MCP.McpTool>,
+  servers: readonly string[],
+  catalogBudget?: number,
+): string {
   return CodeMode.make({
     tools: toolTree(
       [...groupByServer(mcpTools, servers).values()].flat(),
       () => () => Effect.fail(toolError("Tool preview is not executable.")),
     ),
+    discovery: { catalogBudget: catalogBudget ?? DEFAULT_CATALOG_BUDGET },
   }).instructions()
 }
 
@@ -192,6 +201,7 @@ export const CodeModeTool = Tool.define(
     const agents = yield* Agent.Service
     const sessions = yield* Session.Service
     const plugin = yield* Plugin.Service
+    const config = yield* Config.Service
 
     const init: Tool.DefWithoutID<typeof Parameters, Metadata> = {
       description: DESCRIPTION,
@@ -210,6 +220,8 @@ export const CodeModeTool = Tool.define(
         const mcpTools = Permission.visibleTools(yield* mcp.tools(), ruleset)
         const servers = Object.keys(yield* mcp.clients()).map(McpCatalog.sanitize)
         const catalog = [...groupByServer(mcpTools, servers).values()].flat()
+        const cfg = yield* config.get()
+        const catalogBudget = cfg.experimental?.codemode?.catalog_budget ?? DEFAULT_CATALOG_BUDGET
 
         const calls: CallEntry[] = []
         const attachments: Attachment[] = []
@@ -238,6 +250,7 @@ export const CodeModeTool = Tool.define(
 
         const runtime = CodeMode.make({
           tools: toolTree(catalog, callTool),
+          discovery: { catalogBudget },
           onToolCallStart: ({ index, name, input }) =>
             Effect.suspend(() => {
               const shown = (() => {

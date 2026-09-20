@@ -185,6 +185,14 @@ export const Info = Schema.Struct({
       policies: Schema.optional(Schema.mutable(Schema.Array(ConfigExperimental.Policy))).annotate({
         description: "Policy statements applied to supported resources, such as provider access",
       }),
+      codemode: Schema.optional(
+        Schema.Struct({
+          catalog_budget: Schema.optional(NonNegativeInt).annotate({
+            description:
+              "Estimated-token budget for Code Mode MCP tool catalog inlining (default: 1000 when unset at OpenCode host; library default is 2000)",
+          }),
+        }),
+      ),
     }),
   ),
 }).annotate({ identifier: "Config" })

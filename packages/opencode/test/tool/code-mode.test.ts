@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { CODE_MODE_TOOL, CodeModeTool, Parameters, describeCatalog } from "@/tool/code-mode"
+import { CODE_MODE_TOOL, CodeModeTool, DEFAULT_CATALOG_BUDGET, Parameters, describeCatalog } from "@/tool/code-mode"
 import type { Tool as MCPToolDef } from "@modelcontextprotocol/sdk/types.js"
 import type { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Agent } from "@/agent/agent"
+import { Config } from "@/config/config"
 import { MCP } from "@/mcp"
 import { Permission } from "@/permission"
 import { Plugin } from "@/plugin"
@@ -42,6 +43,7 @@ function harness(input: {
   servers: string[]
   permission?: PermissionV1.Rule[]
   trigger?: Plugin.Interface["trigger"]
+  catalogBudget?: number
 }) {
   return Layer.mergeAll(
     Layer.mock(Plugin.Service, {
@@ -55,6 +57,15 @@ function harness(input: {
     }),
     Layer.mock(Session.Service, {
       get: () => Effect.succeed({ permission: [] } as any),
+    }),
+    Layer.mock(Config.Service, {
+      get: () =>
+        Effect.succeed({
+          experimental:
+            input.catalogBudget === undefined
+              ? undefined
+              : { codemode: { catalog_budget: input.catalogBudget } },
+        } as any),
     }),
     Layer.mock(MCP.Service, {
       tools: () => Effect.succeed(input.mcpTools),
@@ -82,8 +93,17 @@ function build(
   )
 }
 
-function describeFor(mcpTools: Record<string, MCP.McpTool>, servers?: string[], permission: PermissionV1.Rule[] = []) {
-  return describeCatalog(Permission.visibleTools(mcpTools, permission), serverNames(mcpTools, servers))
+function describeFor(
+  mcpTools: Record<string, MCP.McpTool>,
+  servers?: string[],
+  permission: PermissionV1.Rule[] = [],
+  catalogBudget?: number,
+) {
+  return describeCatalog(
+    Permission.visibleTools(mcpTools, permission),
+    serverNames(mcpTools, servers),
+    catalogBudget,
+  )
 }
 
 // Program failures die at the tool boundary; recover the defect for message assertions.
@@ -142,6 +162,21 @@ describe("code mode execute", () => {
     expect(tool.description).toBe("Run a confined orchestration script with access to connected MCP tools.")
     expect(tool.description).not.toContain("Available tools")
     expect(tool.description).not.toContain("list_issues")
+  })
+
+  test("catalog budget 0 forces PARTIAL catalog and advertises search", () => {
+    expect(DEFAULT_CATALOG_BUDGET).toBe(1000)
+    const description = describeFor(
+      {
+        github_list_issues: mcpTool("list_issues", () => ""),
+        linear_search: mcpTool("search", () => ""),
+      },
+      undefined,
+      [],
+      0,
+    )
+    expect(description).toContain("Available tools (PARTIAL - ")
+    expect(description).toContain("tools.$codemode.search(")
   })
 
   test("small catalogs inline every full signature in the appended catalog", () => {
