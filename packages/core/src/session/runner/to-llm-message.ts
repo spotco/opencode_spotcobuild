@@ -73,7 +73,10 @@ const assistant = (message: SessionMessage.Assistant, model: Model) => {
   const reuseProviderMetadata = sameModel && message.error === undefined
   const content = message.content.flatMap((item): ContentPart[] => {
     if (item.type === "text") return [{ type: "text", text: item.text }]
-    if (item.type === "reasoning")
+    if (item.type === "reasoning") {
+      // SpotcoBuild: omit settled reasoning from continuation context. Keep
+      // unfinished reasoning only when the assistant turn has not completed.
+      if (message.finish !== undefined) return []
       return sameModel
         ? [
             {
@@ -85,6 +88,7 @@ const assistant = (message: SessionMessage.Assistant, model: Model) => {
         : item.text.length > 0
           ? [{ type: "text", text: item.text }]
           : []
+    }
     const call = toolCall(item, reuseProviderMetadata ? item.provider?.metadata : undefined)
     if (item.provider?.executed !== true) return [call]
     const result = toolResult(

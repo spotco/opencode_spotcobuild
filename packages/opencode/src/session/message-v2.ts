@@ -360,6 +360,10 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
             })
         }
         if (part.type === "reasoning") {
+          // SpotcoBuild: drop settled historical reasoning from model replay.
+          // Keep unfinished/current-turn reasoning when the assistant has not
+          // finished yet (provider signatures / live thinking may still matter).
+          if (msg.info.finish) continue
           if (differentModel) {
             if (part.text.trim().length > 0)
               assistantMessage.parts.push({
