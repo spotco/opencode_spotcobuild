@@ -12,47 +12,41 @@ import { Token } from "../util/token"
 const DEFAULT_BUFFER = 20_000
 const DEFAULT_KEEP_TOKENS = 8_000
 const TOOL_OUTPUT_MAX_CHARS = 2_000
-const SUMMARY_OUTPUT_TOKENS = 4_096
+const SUMMARY_OUTPUT_TOKENS = 1_024
 const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
 <template>
-## Objective
+## Goal
 - [one or two brief sentences describing what the user is trying to accomplish]
 
-## Important Details
-- [constraints/preferences, decisions and why, important facts/assumptions, exact context needed to continue, or "(none)"]
+## Durable Constraints & Decisions
+- [constraints/preferences, decisions and why, important facts/assumptions still needed to continue, or "(none)"]
 
-## Work State
-### Completed
-- [finished work, verified facts, or changes made; otherwise "(none)"]
+## Active State
+- [current work, partial changes, blockers, unknowns, or investigation state; otherwise "(none)"]
 
-### Active
-- [current work, partial changes, or investigation state; otherwise "(none)"]
-
-### Blocked
-- [blockers, failing commands, or unknowns; otherwise "(none)"]
-
-## Next Move
+## Next
 1. [immediate concrete action, or "(none)"]
 2. [next action if known, or "(none)"]
 
-## Relevant Files
+## Working Files
 - [file or directory path: why it matters, or "(none)"]
 </template>
 
 Rules:
 - Keep every section, even when empty.
 - Use terse bullets, not prose paragraphs.
+- Do not include a generic Completed history. Keep only results that affect future work.
 - Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.
-- Do not mention the summary process or that context was compacted.`
-const SUMMARY_UPDATE_INSTRUCTIONS = `The <prior-summary> summarizes everything that happened before the <conversation>. Construct a new summary that combines both. The <prior-summary> is discarded after this: anything you do not carry into the new summary is lost.
+- Do not mention the summarization process or that context was compacted.`
+const SUMMARY_UPDATE_INSTRUCTIONS = `The <prior-summary> summarizes everything that happened before the <conversation>. Construct a new continuation-state checkpoint that combines both. The <prior-summary> is discarded after this: anything you do not carry into the new summary is lost.
 
 When combining:
-- Carry forward objectives, constraints, user directives, decisions, and parallel workstreams from the <prior-summary> even when the <conversation> does not mention them. Drop only what is finished and no longer needed.
+- Carry forward durable constraints, user directives, decisions, and parallel workstreams from the <prior-summary> even when the <conversation> does not mention them.
+- Drop finished disposable history that no longer affects future work. Do not accrete a Completed section.
 - The <conversation> is more recent than the <prior-summary>. Where they conflict, the conversation wins: state the corrected fact and drop the old claim.
-- Add new progress, decisions, constraints, and context from the conversation.
-- Move completed work from "Active" to "Completed".
-- If a blocker has been resolved, update the summary to reflect that while keeping any details still needed to continue the work.
-- Update "Objective" and "Next Move" to reflect the current work state.`
+- Add new progress, decisions, constraints, and active context from the conversation.
+- If a blocker has been resolved, update Active State while keeping any details still needed to continue.
+- Update Goal and Next to reflect the current work state.`
 
 type Entry = {
   readonly seq: number
@@ -101,7 +95,7 @@ const serialize = (message: SessionMessage.Message) => {
     return message.content
       .flatMap((part) => {
         if (part.type === "text") return [`[Assistant]: ${part.text}`]
-        if (part.type === "reasoning") return part.text ? [`[Assistant reasoning]: ${part.text}`] : []
+        if (part.type === "reasoning") return []
         const input = typeof part.state.input === "string" ? part.state.input : JSON.stringify(part.state.input)
         if (part.state.status === "completed")
           return [
