@@ -67,16 +67,20 @@ const toolResult = (tool: SessionMessage.AssistantTool, providerMetadata: Provid
   }
 }
 
-const assistant = (message: SessionMessage.Assistant, model: Model) => {
+type ToLLMMessagesOptions = {
+  readonly omitSettledReasoning?: boolean
+}
+
+const assistant = (message: SessionMessage.Assistant, model: Model, options?: ToLLMMessagesOptions) => {
   const sameModel =
     String(message.model.providerID) === String(model.provider) && String(message.model.id) === String(model.id)
   const reuseProviderMetadata = sameModel && message.error === undefined
   const content = message.content.flatMap((item): ContentPart[] => {
     if (item.type === "text") return [{ type: "text", text: item.text }]
     if (item.type === "reasoning") {
-      // SpotcoBuild: omit settled reasoning from continuation context. Keep
-      // unfinished reasoning only when the assistant turn has not completed.
-      if (message.finish !== undefined) return []
+      // Optional: omit settled reasoning from continuation context when enabled.
+      // Keep unfinished reasoning when the assistant turn has not completed.
+      if (options?.omitSettledReasoning && message.finish !== undefined) return []
       return sameModel
         ? [
             {
@@ -116,7 +120,7 @@ const assistant = (message: SessionMessage.Assistant, model: Model) => {
   ]
 }
 
-function toLLMMessage(message: SessionMessage.Message, model: Model): Message[] {
+function toLLMMessage(message: SessionMessage.Message, model: Model, options?: ToLLMMessagesOptions): Message[] {
   switch (message.type) {
     case "agent-switched":
     case "model-switched":
@@ -147,7 +151,7 @@ function toLLMMessage(message: SessionMessage.Message, model: Model): Message[] 
         }),
       ]
     case "assistant":
-      return assistant(message, model)
+      return assistant(message, model, options)
     case "compaction":
       return [
         Message.make({
@@ -171,5 +175,8 @@ ${message.recent}
 }
 
 /** Translate projected V2 Session history into canonical @opencode-ai/llm context. */
-export const toLLMMessages = (messages: readonly SessionMessage.Message[], model: Model) =>
-  messages.flatMap((message) => toLLMMessage(message, model))
+export const toLLMMessages = (
+  messages: readonly SessionMessage.Message[],
+  model: Model,
+  options?: ToLLMMessagesOptions,
+) => messages.flatMap((message) => toLLMMessage(message, model, options))

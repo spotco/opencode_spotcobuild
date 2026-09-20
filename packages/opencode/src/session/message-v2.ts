@@ -131,7 +131,7 @@ function providerMeta(metadata: Record<string, any> | undefined) {
 export const toModelMessagesEffect = Effect.fnUntraced(function* (
   input: WithParts[],
   model: Provider.Model,
-  options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
+  options?: { stripMedia?: boolean; toolOutputMaxChars?: number; omitSettledReasoning?: boolean },
 ) {
   const result: UIMessage[] = []
   const toolNames = new Set<string>()
@@ -360,10 +360,10 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
             })
         }
         if (part.type === "reasoning") {
-          // SpotcoBuild: drop settled historical reasoning from model replay.
-          // Keep unfinished/current-turn reasoning when the assistant has not
-          // finished yet (provider signatures / live thinking may still matter).
-          if (msg.info.finish) continue
+          // Optional: drop settled historical reasoning from model replay when
+          // experimental.omit_settled_reasoning is enabled. Keep unfinished /
+          // current-turn reasoning (provider signatures / live thinking).
+          if (options?.omitSettledReasoning && msg.info.finish) continue
           if (differentModel) {
             if (part.text.trim().length > 0)
               assistantMessage.parts.push({
@@ -421,7 +421,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 export function toModelMessages(
   input: WithParts[],
   model: Provider.Model,
-  options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
+  options?: { stripMedia?: boolean; toolOutputMaxChars?: number; omitSettledReasoning?: boolean },
 ): Promise<ModelMessage[]> {
   return Effect.runPromise(toModelMessagesEffect(input, model, options))
 }

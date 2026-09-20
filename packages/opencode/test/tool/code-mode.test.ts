@@ -165,7 +165,7 @@ describe("code mode execute", () => {
   })
 
   test("catalog budget 0 forces PARTIAL catalog and advertises search", () => {
-    expect(DEFAULT_CATALOG_BUDGET).toBe(1000)
+    expect(DEFAULT_CATALOG_BUDGET).toBe(2000)
     const description = describeFor(
       {
         github_list_issues: mcpTool("list_issues", () => ""),

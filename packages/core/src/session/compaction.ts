@@ -12,8 +12,55 @@ import { Token } from "../util/token"
 const DEFAULT_BUFFER = 20_000
 const DEFAULT_KEEP_TOKENS = 8_000
 const TOOL_OUTPUT_MAX_CHARS = 2_000
-const SUMMARY_OUTPUT_TOKENS = 1_024
+/** Upstream-compatible default when compaction.summary_max_tokens is unset. */
+export const DEFAULT_SUMMARY_MAX_TOKENS = 4_096
+const SUMMARY_OUTPUT_TOKENS = DEFAULT_SUMMARY_MAX_TOKENS
+
+export type CheckpointStyle = "summary" | "continuation"
+
 const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
+<template>
+## Objective
+- [one or two brief sentences describing what the user is trying to accomplish]
+
+## Important Details
+- [constraints/preferences, decisions and why, important facts/assumptions, exact context needed to continue, or "(none)"]
+
+## Work State
+### Completed
+- [finished work, verified facts, or changes made; otherwise "(none)"]
+
+### Active
+- [current work, partial changes, or investigation state; otherwise "(none)"]
+
+### Blocked
+- [blockers, failing commands, or unknowns; otherwise "(none)"]
+
+## Next Move
+1. [immediate concrete action, or "(none)"]
+2. [next action if known, or "(none)"]
+
+## Relevant Files
+- [file or directory path: why it matters, or "(none)"]
+</template>
+
+Rules:
+- Keep every section, even when empty.
+- Use terse bullets, not prose paragraphs.
+- Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.
+- Do not mention the summary process or that context was compacted.`
+
+const SUMMARY_UPDATE_INSTRUCTIONS = `The <prior-summary> summarizes everything that happened before the <conversation>. Construct a new summary that combines both. The <prior-summary> is discarded after this: anything you do not carry into the new summary is lost.
+
+When combining:
+- Carry forward objectives, constraints, user directives, decisions, and parallel workstreams from the <prior-summary> even when the <conversation> does not mention them. Drop only what is finished and no longer needed.
+- The <conversation> is more recent than the <prior-summary>. Where they conflict, the conversation wins: state the corrected fact and drop the old claim.
+- Add new progress, decisions, constraints, and context from the conversation.
+- Move completed work from "Active" to "Completed".
+- If a blocker has been resolved, update the summary to reflect that while keeping any details still needed to continue the work.
+- Update "Objective" and "Next Move" to reflect the current work state.`
+
+const CONTINUATION_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
 <template>
 ## Goal
 - [one or two brief sentences describing what the user is trying to accomplish]
@@ -38,7 +85,8 @@ Rules:
 - Do not include a generic Completed history. Keep only results that affect future work.
 - Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.
 - Do not mention the summarization process or that context was compacted.`
-const SUMMARY_UPDATE_INSTRUCTIONS = `The <prior-summary> summarizes everything that happened before the <conversation>. Construct a new continuation-state checkpoint that combines both. The <prior-summary> is discarded after this: anything you do not carry into the new summary is lost.
+
+const CONTINUATION_UPDATE_INSTRUCTIONS = `The <prior-summary> summarizes everything that happened before the <conversation>. Construct a new continuation-state checkpoint that combines both. The <prior-summary> is discarded after this: anything you do not carry into the new summary is lost.
 
 When combining:
 - Carry forward durable constraints, user directives, decisions, and parallel workstreams from the <prior-summary> even when the <conversation> does not mention them.
@@ -57,6 +105,8 @@ type Settings = {
   readonly auto: boolean
   readonly buffer: number
   readonly tokens: number
+  readonly summaryMaxTokens: number
+  readonly checkpointStyle: CheckpointStyle
 }
 
 type Dependencies = {
@@ -95,6 +145,7 @@ const serialize = (message: SessionMessage.Message) => {
     return message.content
       .flatMap((part) => {
         if (part.type === "text") return [`[Assistant]: ${part.text}`]
+        // Compaction serializer always omits assistant reasoning to keep checkpoints small.
         if (part.type === "reasoning") return []
         const input = typeof part.state.input === "string" ? part.state.input : JSON.stringify(part.state.input)
         if (part.state.status === "completed")
@@ -123,8 +174,16 @@ const settings = (documents: readonly Config.Entry[]) => {
       auto: current.auto ?? result.auto,
       buffer: current.buffer ?? result.buffer,
       tokens: current.keep?.tokens ?? result.tokens,
+      summaryMaxTokens: current.summary_max_tokens ?? result.summaryMaxTokens,
+      checkpointStyle: current.checkpoint_style ?? result.checkpointStyle,
     }),
-    { auto: true, buffer: DEFAULT_BUFFER, tokens: DEFAULT_KEEP_TOKENS },
+    {
+      auto: true,
+      buffer: DEFAULT_BUFFER,
+      tokens: DEFAULT_KEEP_TOKENS,
+      summaryMaxTokens: SUMMARY_OUTPUT_TOKENS,
+      checkpointStyle: "summary",
+    },
   )
 }
 
@@ -151,19 +210,30 @@ const select = (
   }
 }
 
-export const buildPrompt = (input: { readonly previousSummary?: string; readonly context: readonly string[] }) => {
+const templateFor = (style: CheckpointStyle) =>
+  style === "continuation"
+    ? { template: CONTINUATION_TEMPLATE, update: CONTINUATION_UPDATE_INSTRUCTIONS }
+    : { template: SUMMARY_TEMPLATE, update: SUMMARY_UPDATE_INSTRUCTIONS }
+
+export const buildPrompt = (input: {
+  readonly previousSummary?: string
+  readonly context: readonly string[]
+  readonly checkpointStyle?: CheckpointStyle
+}) => {
+  const style = input.checkpointStyle ?? "summary"
+  const { template, update } = templateFor(style)
   const conversation = `Here is the conversation so far:\n\n<conversation>\n${input.context.join("\n\n")}\n</conversation>`
   if (!input.previousSummary)
     return [
       conversation,
       "Create a new anchored summary from the conversation history in the <conversation> tags above so another coding agent can continue the work.",
-      SUMMARY_TEMPLATE,
+      template,
     ].join("\n\n")
   return [
     conversation,
     `Here is the summary of the conversation before the <conversation> above:\n\n<prior-summary>\n${input.previousSummary}\n</prior-summary>`,
-    SUMMARY_UPDATE_INSTRUCTIONS,
-    SUMMARY_TEMPLATE,
+    update,
+    template,
   ].join("\n\n")
 }
 
@@ -179,8 +249,9 @@ export const make = (dependencies: Dependencies) => {
     const summaryPrompt = buildPrompt({
       previousSummary: previousSummary?.type === "compaction" ? previousSummary.summary : undefined,
       context: [previousSummary?.type === "compaction" ? previousSummary.recent : "", selected.head].filter(Boolean),
+      checkpointStyle: config.checkpointStyle,
     })
-    const summaryOutput = Math.min(output || SUMMARY_OUTPUT_TOKENS, SUMMARY_OUTPUT_TOKENS)
+    const summaryOutput = Math.min(output || config.summaryMaxTokens, config.summaryMaxTokens)
     if (Token.estimate(summaryPrompt) > context - summaryOutput) return false
     const messageID = SessionMessage.ID.create()
     yield* dependencies.events.publish(SessionEvent.Compaction.Started, {

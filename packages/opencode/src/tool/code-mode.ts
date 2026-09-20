@@ -12,8 +12,8 @@ import { Config } from "@/config/config"
 
 export const CODE_MODE_TOOL = "execute"
 
-/** SpotcoBuild small-model default when config experimental.codemode.catalog_budget is unset. */
-export const DEFAULT_CATALOG_BUDGET = 1000
+/** Default estimated-token budget for Code Mode MCP catalog inlining when unset. */
+export const DEFAULT_CATALOG_BUDGET = 2000
 
 const DESCRIPTION = "Run a confined orchestration script with access to connected MCP tools."
 

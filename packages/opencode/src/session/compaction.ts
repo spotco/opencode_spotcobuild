@@ -25,8 +25,8 @@ import { SessionCompactionEvent } from "@opencode-ai/schema/session-compaction-e
 
 export const Event = SessionCompactionEvent
 
-export const PRUNE_MINIMUM = 8_000
-export const PRUNE_PROTECT = 20_000
+export const PRUNE_MINIMUM = 20_000
+export const PRUNE_PROTECT = 40_000
 const TOOL_OUTPUT_MAX_CHARS = 2_000
 const PRUNE_PROTECTED_TOOLS = ["skill"]
 const MIN_PRESERVE_RECENT_TOKENS = 2_000
@@ -268,11 +268,13 @@ const layer = Layer.effect(
       }
     })
 
-    // goes backwards through parts until there are PRUNE_PROTECT tokens worth of tool
+    // goes backwards through parts until there are pruneProtect tokens worth of tool
     // calls, then erases output of older tool calls to free context space
     const prune = Effect.fn("SessionCompaction.prune")(function* (input: { sessionID: SessionID }) {
       const cfg = yield* config.get()
       if (!cfg.compaction?.prune) return
+      const pruneProtect = cfg.compaction.prune_protect_tokens ?? PRUNE_PROTECT
+      const pruneMinimum = cfg.compaction.prune_minimum_tokens ?? PRUNE_MINIMUM
       yield* Effect.logInfo("pruning")
 
       const msgs = yield* session
@@ -298,14 +300,14 @@ const layer = Layer.effect(
           if (part.state.time.compacted) break loop
           const estimate = Token.estimate(part.state.output)
           total += estimate
-          if (total <= PRUNE_PROTECT) continue
+          if (total <= pruneProtect) continue
           pruned += estimate
           toPrune.push(part)
         }
       }
 
       yield* Effect.logInfo("found", { pruned, total })
-      if (pruned > PRUNE_MINIMUM) {
+      if (pruned > pruneMinimum) {
         for (const part of toPrune) {
           if (part.state.status === "completed") {
             part.state.time.compacted = Date.now()
@@ -384,6 +386,7 @@ const layer = Layer.effect(
           buildPrompt({
             previousSummary,
             context: [conversation],
+            checkpointStyle: cfg.compaction?.checkpoint_style ?? "summary",
           }),
           ...compacting.context,
         ]

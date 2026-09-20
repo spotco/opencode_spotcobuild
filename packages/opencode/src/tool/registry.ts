@@ -289,7 +289,7 @@ const layer = Layer.effect(
       return codeMode.describeCatalog(
         tools,
         Object.keys(yield* mcp.clients()).map(McpCatalog.sanitize),
-        cfg.experimental?.codemode?.catalog_budget ?? 1000,
+        cfg.experimental?.codemode?.catalog_budget ?? codeMode.DEFAULT_CATALOG_BUDGET,
       )
     })
 

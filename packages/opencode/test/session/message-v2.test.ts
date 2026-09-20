@@ -1361,6 +1361,98 @@ describe("session.message-v2.toModelMessage", () => {
     const texts = (result[0].content as any[]).filter((p) => p.type === "text")
     expect(texts.map((t) => t.text)).toStrictEqual(["", "hello"])
   })
+
+  test("keeps finished-turn reasoning when omitSettledReasoning is false/unset", async () => {
+    const assistantID = "m-assistant-finished-reasoning"
+    const info = {
+      ...assistantInfo(assistantID, "m-parent"),
+      finish: "end_turn",
+    } as SessionV1.Assistant
+    const input: SessionV1.WithParts[] = [
+      {
+        info,
+        parts: [
+          {
+            ...basePart(assistantID, "p1"),
+            type: "reasoning",
+            text: "settled thought",
+            time: { start: 0, end: 1 },
+          },
+          { ...basePart(assistantID, "p2"), type: "text", text: "answer" },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+    expect(result).toStrictEqual([
+      {
+        role: "assistant",
+        content: [
+          { type: "reasoning", text: "settled thought", providerOptions: undefined },
+          { type: "text", text: "answer" },
+        ],
+      },
+    ])
+  })
+
+  test("omits finished-turn reasoning when omitSettledReasoning is true", async () => {
+    const assistantID = "m-assistant-omit-settled"
+    const info = {
+      ...assistantInfo(assistantID, "m-parent"),
+      finish: "end_turn",
+    } as SessionV1.Assistant
+    const input: SessionV1.WithParts[] = [
+      {
+        info,
+        parts: [
+          {
+            ...basePart(assistantID, "p1"),
+            type: "reasoning",
+            text: "settled thought",
+            time: { start: 0, end: 1 },
+          },
+          { ...basePart(assistantID, "p2"), type: "text", text: "answer" },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model, { omitSettledReasoning: true })
+    expect(result).toStrictEqual([
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "answer" }],
+      },
+    ])
+  })
+
+  test("keeps unfinished reasoning even when omitSettledReasoning is true", async () => {
+    const assistantID = "m-assistant-live-reasoning"
+    const input: SessionV1.WithParts[] = [
+      {
+        info: assistantInfo(assistantID, "m-parent"),
+        parts: [
+          {
+            ...basePart(assistantID, "p1"),
+            type: "reasoning",
+            text: "live thought",
+            time: { start: 0 },
+          },
+          { ...basePart(assistantID, "p2"), type: "text", text: "partial" },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model, { omitSettledReasoning: true })
+    expect(result).toStrictEqual([
+      {
+        role: "assistant",
+        content: [
+          { type: "reasoning", text: "live thought", providerOptions: undefined },
+          { type: "text", text: "partial" },
+        ],
+      },
+    ])
+  })
 })
 
 describe("session.message-v2.fromError", () => {
