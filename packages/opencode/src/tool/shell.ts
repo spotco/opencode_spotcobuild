@@ -65,6 +65,32 @@ const CMD_FILES = new Set([
 const FLAGS = new Set(["-destination", "-literalpath", "-path"])
 const SWITCHES = new Set(["-confirm", "-debug", "-force", "-nonewline", "-recurse", "-verbose", "-whatif"])
 
+export function classifyBrowserProcessControl(
+  command: string,
+): { kind: "kill" | "start" | "debug-port"; reason: string } | undefined {
+  const text = command.toLowerCase()
+  if (!/\b(?:brave|chrome|chromium)(?:\.exe)?\b/.test(text)) return undefined
+  if (/--remote-debugging(?:-port)?(?:\s|=)|--remote-debugging/.test(text)) {
+    return { kind: "debug-port", reason: "changes a managed browser debugging endpoint" }
+  }
+  if (/\b(?:taskkill|stop-process|pkill|kill|terminate-process)\b/.test(text)) {
+    return { kind: "kill", reason: "terminates a managed browser process" }
+  }
+  if (/\b(?:start-process|start)\b/.test(text)) {
+    return { kind: "start", reason: "starts a separate browser process" }
+  }
+  return undefined
+}
+
+export function hasConnectedManagedMcp(extra: Tool.Context["extra"], managedServers: readonly string[]) {
+  const statuses = extra?.mcpStatus
+  if (typeof statuses !== "object" || statuses === null || Array.isArray(statuses)) return false
+  return managedServers.some((server) => {
+    const status = (statuses as Record<string, unknown>)[server]
+    return typeof status === "object" && status !== null && !Array.isArray(status) && (status as { status?: unknown }).status === "connected"
+  })
+}
+
 type Part = {
   type: string
   text: string
@@ -614,6 +640,31 @@ export const ShellTool = Tool.define(
                 : instanceCtx.directory
               if (params.timeout !== undefined && params.timeout < 0) {
                 throw new Error(`Invalid timeout value: ${params.timeout}. Timeout must be a positive number.`)
+              }
+              const guard = cfg.experimental?.browser_process_guard
+              const browserControl = guard?.enabled === true ? classifyBrowserProcessControl(params.command) : undefined
+              const managedServers = guard?.managed_servers ?? []
+              const browserMcpAvailable = hasConnectedManagedMcp(ctx.extra, managedServers)
+              if (browserControl && browserMcpAvailable) {
+                yield* Effect.logWarning("browser process control requested", {
+                  sessionID: ctx.sessionID,
+                  kind: browserControl.kind,
+                  reason: browserControl.reason,
+                  managedServers,
+                })
+                yield* ctx.ask({
+                  permission: "browser_process_control",
+                  patterns: [params.command],
+                  always: [],
+                  metadata: {
+                    command: params.command,
+                    reason: browserControl.reason,
+                    managedServers,
+                    browserMcpAvailable,
+                    message:
+                      "Use the existing managed browser MCP session unless the user explicitly requested process control.",
+                  },
+                })
               }
               const timeout = params.timeout ?? defaultTimeoutMs
               const ps = Shell.ps(shell)

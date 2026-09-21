@@ -56,6 +56,17 @@ import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
+import { Snapshot } from "@/snapshot"
+import {
+  ACTION_WATCHDOG_MARKER,
+  VERIFICATION_MARKER,
+  compactVerificationDiff,
+  compactOriginalUserText,
+  shouldTriggerActionWatchdog,
+  shouldTriggerPostEditVerification,
+  shouldStopPostEditVerificationTurn,
+  verificationMessageWindow,
+} from "./small-model-behavior"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -140,6 +151,7 @@ const layer = Layer.effect(
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
+    const snapshot = yield* Snapshot.Service
     const { db } = database
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
@@ -1083,7 +1095,34 @@ const layer = Layer.effect(
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
+        let actionSeen = false
+        let actionWatchdogContinuations = 0
+        let verificationPasses = 0
+        let verificationTurns = 0
+        let verificationTriggered = false
+        let verificationMessageID: MessageID | undefined
+        let filesChangedDuringTask = false
+        const verificationFilesChanged = new Set<string>()
+        const verificationDiffs = new Set<string>()
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+        const taskStartSnapshot = yield* Effect.gen(function* () {
+          const cfg = yield* config.get()
+          if (cfg.experimental?.post_edit_verification?.enabled !== true) return undefined
+          return yield* snapshot.track()
+        })
+        const initialMessages = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
+          Effect.provideService(Database.Service, database),
+        )
+        const rootUserMessage = initialMessages.findLast(
+          (message) =>
+            message.info.role === "user" &&
+            message.parts.some((part) => part.type === "text" && part.synthetic !== true),
+        )
+        const rootUserText =
+          rootUserMessage?.parts
+            .filter((part): part is SessionV1.TextPart => part.type === "text" && part.synthetic !== true)
+            .map((part) => part.text)
+            .join("\n") ?? ""
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
@@ -1255,12 +1294,17 @@ const layer = Layer.effect(
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
             const cfg = yield* config.get()
+            const verificationMessages = verificationMessageWindow(msgs, verificationMessageID)
+            const isVerificationTurn = verificationMessageID !== undefined
+            const watchdog = cfg.experimental?.small_model_action_watchdog
+            const verification = cfg.experimental?.post_edit_verification
+            if (isVerificationTurn) verificationTurns++
             const [skills, env, instructions, mcpInstructions, modelMsgs] = yield* Effect.all([
               sys.skills(agent),
               sys.environment(model),
               instruction.system().pipe(Effect.orDie),
               sys.mcp(agent, session.permission),
-              MessageV2.toModelMessagesEffect(msgs, model, {
+              MessageV2.toModelMessagesEffect(verificationMessages ?? msgs, model, {
                 omitSettledReasoning: cfg.experimental?.omit_settled_reasoning === true,
               }),
             ])
@@ -1286,11 +1330,49 @@ const layer = Layer.effect(
               tools,
               model,
               toolChoice: format.type === "json_schema" ? "required" : undefined,
+              maxOutputTokens:
+                isVerificationTurn && verification?.enabled === true
+                  ? (verification.max_tokens ?? 2048)
+                  : watchdog?.enabled === true && !actionSeen
+                    ? (watchdog.pre_action_max_tokens ?? 2048)
+                    : undefined,
             })
+
+            if (handle.metrics.progressActionSeen ?? handle.metrics.meaningfulAction) actionSeen = true
+            if (handle.metrics.filesChanged.length > 0) filesChangedDuringTask = true
+            if (verification?.enabled === true) {
+              for (const file of handle.metrics.filesChanged) verificationFilesChanged.add(file)
+              if (!taskStartSnapshot) {
+                const turnVerificationBundle = handle.getVerificationBundle
+                  ? yield* handle.getVerificationBundle()
+                  : { files: handle.metrics.filesChanged, diff: "" }
+                for (const file of turnVerificationBundle.files) verificationFilesChanged.add(file)
+                if (turnVerificationBundle.diff.trim()) verificationDiffs.add(turnVerificationBundle.diff)
+              }
+            }
 
             if (structured !== undefined) {
               handle.message.structured = structured
               handle.message.finish = handle.message.finish ?? "stop"
+              yield* sessions.updateMessage(handle.message)
+              return "break" as const
+            }
+
+            const verificationTurnLimit = verification?.max_turns ?? 8
+            if (
+              isVerificationTurn &&
+              shouldStopPostEditVerificationTurn({
+                finish: handle.message.finish,
+                turns: verificationTurns,
+                maxTurns: verificationTurnLimit,
+              })
+            ) {
+              yield* Effect.logWarning("small-model post-edit verification turn limit reached", {
+                sessionID,
+                turns: verificationTurns,
+                maxTurns: verificationTurnLimit,
+              })
+              handle.message.finish = "stop"
               yield* sessions.updateMessage(handle.message)
               return "break" as const
             }
@@ -1316,6 +1398,79 @@ const layer = Layer.effect(
                 }).toObject()
                 yield* sessions.updateMessage(handle.message)
                 return "break" as const
+              }
+
+              if (
+                shouldTriggerActionWatchdog({
+                  enabled: watchdog?.enabled === true,
+                  finish: handle.message.finish,
+                  hasAction: actionSeen,
+                  forcedContinuations: actionWatchdogContinuations,
+                  maxForcedContinuations: watchdog?.max_forced_continuations ?? 1,
+                  hasError: Boolean(handle.message.error),
+                  aborted: false,
+                })
+              ) {
+                actionWatchdogContinuations++
+                yield* Effect.logInfo("small-model action watchdog triggered", {
+                  sessionID,
+                  continuation: actionWatchdogContinuations,
+                  maxTokens: watchdog?.pre_action_max_tokens ?? 2048,
+                })
+                yield* createUserMessage({
+                  sessionID,
+                  agent: lastUser.agent,
+                  model: lastUser.model,
+                  parts: [
+                    {
+                      type: "text",
+                      synthetic: true,
+                      text: `${ACTION_WATCHDOG_MARKER}\nTake the next concrete action now. Use a tool or edit instead of repeating the analysis.`,
+                    },
+                  ],
+                }).pipe(Effect.orDie)
+                return "continue" as const
+              }
+
+              if (
+                shouldTriggerPostEditVerification({
+                  enabled: verification?.enabled === true,
+                  filesChanged: filesChangedDuringTask,
+                  triggered: verificationTriggered,
+                  passes: verificationPasses,
+                  maxPasses: verification?.max_passes ?? 1,
+                  hasError: Boolean(handle.message.error),
+                  aborted: false,
+                })
+              ) {
+                verificationTriggered = true
+                verificationPasses++
+                const currentDiff = taskStartSnapshot
+                  ? yield* snapshot.diff(taskStartSnapshot)
+                  : [...verificationDiffs].join("\n")
+                const changedFiles = [...verificationFilesChanged]
+                const diff = compactVerificationDiff(currentDiff)
+                yield* Effect.logInfo("small-model post-edit verification triggered", {
+                  sessionID,
+                  pass: verificationPasses,
+                  maxTokens: verification?.max_tokens ?? 2048,
+                  changedFiles: changedFiles.length,
+                  diffChars: diff.length,
+                })
+                const verifierMessage = yield* createUserMessage({
+                  sessionID,
+                  agent: lastUser.agent,
+                  model: lastUser.model,
+                  parts: [
+                    {
+                      type: "text",
+                      synthetic: true,
+                      text: `${VERIFICATION_MARKER}\nOriginal request:\n${compactOriginalUserText(rootUserText)}\n\nChanged files (successful edits in this run):\n${changedFiles.length > 0 ? changedFiles.map((file) => `- ${file}`).join("\n") : "(none recorded)"}\n\nCurrent diff (bounded):\n${diff || "(diff unavailable; inspect the listed files only if needed)"}\n\nVerify that every reported symptom or requested behavior is actually addressed by the current changes. Check the implementation, not just syntax. If anything remains unexplained or unfixed, correct it and run targeted verification. Do not make unrelated changes. This is the only verification pass.`,
+                    },
+                  ],
+                }).pipe(Effect.orDie)
+                verificationMessageID = verifierMessage.info.id
+                return "continue" as const
               }
             }
 
@@ -1628,6 +1783,7 @@ export const node = LayerNode.make({
     EventV2Bridge.node,
     RuntimeFlags.node,
     Database.node,
+    Snapshot.node,
   ],
 })
 

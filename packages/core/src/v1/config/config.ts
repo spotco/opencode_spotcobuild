@@ -207,9 +207,29 @@ export const Info = Schema.Struct({
       codemode: Schema.optional(
         Schema.Struct({
           catalog_budget: Schema.optional(NonNegativeInt).annotate({
-            description:
-              "Estimated-token budget for Code Mode MCP tool catalog inlining (default: 2000 when unset)",
+            description: "Estimated-token budget for Code Mode MCP tool catalog inlining (default: 2000 when unset)",
           }),
+        }),
+      ),
+      small_model_action_watchdog: Schema.optional(
+        Schema.Struct({
+          enabled: Schema.optional(Schema.Boolean),
+          pre_action_max_tokens: Schema.optional(PositiveInt),
+          max_forced_continuations: Schema.optional(NonNegativeInt),
+        }),
+      ),
+      post_edit_verification: Schema.optional(
+        Schema.Struct({
+          enabled: Schema.optional(Schema.Boolean),
+          max_tokens: Schema.optional(PositiveInt),
+          max_passes: Schema.optional(PositiveInt),
+          max_turns: Schema.optional(PositiveInt),
+        }),
+      ),
+      browser_process_guard: Schema.optional(
+        Schema.Struct({
+          enabled: Schema.optional(Schema.Boolean),
+          managed_servers: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
         }),
       ),
     }),

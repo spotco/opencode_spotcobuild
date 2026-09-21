@@ -25,6 +25,7 @@ import { isRecord } from "@/util/record"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
+import { codeModeMcpToolCalls, isInspectionToolName, isMcpToolName, isProgressAction } from "./small-model-behavior"
 
 const DOOM_LOOP_THRESHOLD = 3
 export type Result = "compact" | "stop" | "continue"
@@ -45,6 +46,18 @@ export interface Handle {
     },
   ) => Effect.Effect<void>
   readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<Result>
+  readonly metrics: {
+    readonly meaningfulAction: boolean
+    readonly progressActionSeen?: boolean
+    readonly inspectionSeen?: boolean
+    readonly toolCalls: number
+    readonly mcpCalls: number
+    readonly shellCommands: number
+    readonly fileReads: number
+    readonly repeatedUnchangedReads: number
+    readonly filesChanged: readonly string[]
+  }
+  readonly getVerificationBundle?: () => Effect.Effect<{ files: readonly string[]; diff: string }>
 }
 
 type Input = {
@@ -72,6 +85,18 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: SessionV1.TextPart | undefined
   reasoningMap: Record<string, SessionV1.ReasoningPart>
+  actionCallIDs: Set<string>
+  meaningfulAction: boolean
+  progressActionSeen: boolean
+  inspectionSeen: boolean
+  toolCalls: number
+  mcpCalls: number
+  shellCommands: number
+  fileReads: number
+  repeatedUnchangedReads: number
+  readKeys: Set<string>
+  filesChanged: Set<string>
+  patches: Array<{ hash: string; files: readonly string[] }>
 }
 
 type StreamEvent = LLMEvent
@@ -111,6 +136,18 @@ const layer = Layer.effect(
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        actionCallIDs: new Set(),
+        meaningfulAction: false,
+        progressActionSeen: false,
+        inspectionSeen: false,
+        toolCalls: 0,
+        mcpCalls: 0,
+        shellCommands: 0,
+        fileReads: 0,
+        repeatedUnchangedReads: 0,
+        readKeys: new Set(),
+        filesChanged: new Set(),
+        patches: [],
       }
       let aborted = false
 
@@ -252,6 +289,85 @@ const layer = Layer.effect(
         return { call: ctx.toolcalls[input.id], part }
       })
 
+      const recordAction = (input: { id: string; name: string; toolInput?: unknown }) => {
+        const name = input.name.toLowerCase()
+        const alreadyRecorded = ctx.actionCallIDs.has(input.id)
+        // tool-input-start/delta events arrive before tool-call and do not
+        // necessarily carry the decoded arguments. Enrich the action record
+        // when the later tool-call supplies them instead of discarding it as
+        // a duplicate.
+        if (alreadyRecorded) {
+          if ((name === "read" || name.includes("read_file") || name === "cat") && input.toolInput !== undefined) {
+            const key = JSON.stringify(input.toolInput)
+            if (ctx.readKeys.has(key)) ctx.repeatedUnchangedReads++
+            ctx.readKeys.add(key)
+          }
+          return
+        }
+        ctx.actionCallIDs.add(input.id)
+        ctx.toolCalls++
+        if (name === "read" || name.includes("read_file") || name === "cat") {
+          ctx.fileReads++
+          if (input.toolInput !== undefined) {
+            const key = JSON.stringify(input.toolInput)
+            if (ctx.readKeys.has(key)) ctx.repeatedUnchangedReads++
+            ctx.readKeys.add(key)
+          }
+        }
+        if (["bash", "shell", "powershell", "pwsh", "cmd", "terminal"].includes(name)) ctx.shellCommands++
+      }
+
+      const recordChangedFiles = (files: readonly string[]) => {
+        if (files.length > 0) ctx.progressActionSeen = true
+        ctx.meaningfulAction = ctx.progressActionSeen
+        for (const file of files) ctx.filesChanged.add(file)
+      }
+
+      const recordSuccessfulAction = (input: { name: string; toolInput?: unknown; metadata: Record<string, any> }) => {
+        const name = input.name.toLowerCase()
+        const childTools = name === "execute" ? codeModeMcpToolCalls(input.metadata) : []
+        if (childTools.length > 0) {
+          for (const child of childTools) {
+            ctx.mcpCalls++
+            if (child.status === "completed" && !isInspectionToolName(child.tool)) {
+              ctx.progressActionSeen = true
+              ctx.meaningfulAction = true
+            } else {
+              ctx.inspectionSeen = true
+            }
+          }
+        } else {
+          if (isMcpToolName(input.name)) ctx.mcpCalls++
+          if (isProgressAction(input.name, input.toolInput)) {
+            ctx.progressActionSeen = true
+            ctx.meaningfulAction = true
+          } else {
+            ctx.inspectionSeen = true
+          }
+        }
+
+        if (name === "edit" || name === "write" || name === "write_file" || name.includes("apply_patch")) {
+          if (isRecord(input.toolInput)) {
+            const file = input.toolInput.filePath ?? input.toolInput.path ?? input.toolInput.file
+            if (typeof file === "string") ctx.filesChanged.add(file)
+          }
+        }
+        const metadataFiles = input.metadata.files
+        if (Array.isArray(metadataFiles)) {
+          for (const file of metadataFiles) if (typeof file === "string") ctx.filesChanged.add(file)
+        }
+      }
+
+      const getVerificationBundle = Effect.fn("SessionProcessor.getVerificationBundle")(function* () {
+        const diffs = yield* Effect.forEach(ctx.patches, (patch) =>
+          snapshot.diff(patch.hash).pipe(Effect.catch(() => Effect.succeed(""))),
+        )
+        return {
+          files: [...ctx.filesChanged],
+          diff: diffs.filter((diff) => diff.trim().length > 0).join("\n"),
+        }
+      })
+
       const isFilePart = (value: unknown): value is SessionV1.FilePart => Schema.is(SessionV1.FilePart)(value)
 
       const toolResultOutput = (
@@ -316,14 +432,17 @@ const layer = Layer.effect(
             if (ctx.assistantMessage.summary) {
               throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
             }
+            recordAction(value)
             yield* ensureToolCall(value)
             return
 
           case "tool-input-delta":
+            recordAction(value)
             yield* ensureToolCall(value)
             return
 
           case "tool-input-end": {
+            recordAction(value)
             yield* ensureToolCall(value)
             return
           }
@@ -332,6 +451,7 @@ const layer = Layer.effect(
             if (ctx.assistantMessage.summary) {
               throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
             }
+            recordAction({ id: value.id, name: value.name, toolInput: value.input })
             yield* ensureToolCall(value)
             const input = isRecord(value.input) ? value.input : { value: value.input }
             yield* updateToolCall(value.id, (match) => ({
@@ -388,6 +508,8 @@ const layer = Layer.effect(
               return
             }
             const rawOutput = toolResultOutput(value)
+            const toolInput = toolCall && "input" in toolCall.part.state ? toolCall.part.state.input : undefined
+            recordSuccessfulAction({ name: value.name, toolInput, metadata: rawOutput.metadata })
             const normalized = yield* Effect.forEach(rawOutput.attachments ?? [], (attachment) =>
               attachment.mime.startsWith("image/")
                 ? image.normalize(attachment).pipe(
@@ -471,6 +593,8 @@ const layer = Layer.effect(
             if (ctx.snapshot) {
               const patch = yield* snapshot.patch(ctx.snapshot)
               if (patch.files.length) {
+                ctx.patches.push(patch)
+                recordChangedFiles(patch.files)
                 yield* session.updatePart({
                   id: PartID.ascending(),
                   messageID: ctx.assistantMessage.id,
@@ -554,6 +678,7 @@ const layer = Layer.effect(
         if (ctx.snapshot) {
           const patch = yield* snapshot.patch(ctx.snapshot)
           if (patch.files.length) {
+            recordChangedFiles(patch.files)
             yield* session.updatePart({
               id: PartID.ascending(),
               messageID: ctx.assistantMessage.id,
@@ -608,6 +733,19 @@ const layer = Layer.effect(
         ctx.toolcalls = {}
         ctx.assistantMessage.time.completed = Date.now()
         yield* session.updateMessage(ctx.assistantMessage)
+        yield* Effect.logInfo("session action metrics", {
+          sessionID: ctx.sessionID,
+          messageID: ctx.assistantMessage.id,
+          meaningfulAction: ctx.meaningfulAction,
+          progressActionSeen: ctx.progressActionSeen,
+          inspectionSeen: ctx.inspectionSeen,
+          toolCalls: ctx.toolCalls,
+          mcpCalls: ctx.mcpCalls,
+          shellCommands: ctx.shellCommands,
+          fileReads: ctx.fileReads,
+          repeatedUnchangedReads: ctx.repeatedUnchangedReads,
+          filesChanged: ctx.filesChanged.size,
+        })
       })
 
       const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
@@ -703,6 +841,20 @@ const layer = Layer.effect(
         updateToolCall,
         completeToolCall,
         process,
+        get metrics() {
+          return {
+            meaningfulAction: ctx.meaningfulAction,
+            progressActionSeen: ctx.progressActionSeen,
+            inspectionSeen: ctx.inspectionSeen,
+            toolCalls: ctx.toolCalls,
+            mcpCalls: ctx.mcpCalls,
+            shellCommands: ctx.shellCommands,
+            fileReads: ctx.fileReads,
+            repeatedUnchangedReads: ctx.repeatedUnchangedReads,
+            filesChanged: [...ctx.filesChanged],
+          }
+        },
+        getVerificationBundle,
       } satisfies Handle
     })
 
