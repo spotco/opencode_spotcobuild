@@ -90,11 +90,9 @@ export function isInspectionToolName(toolName: string) {
     "pwd",
   ]
   const matchesMarker = (candidate: string) =>
-    markers.some((marker) =>
-      [candidate === marker, candidate.endsWith(`_${marker}`), candidate.includes(`_${marker}_`)].some(Boolean),
-    )
-  const readOnlyVerb = /(?:^|[._])(?:get_|list_|read_|search_|inspect_|snapshot)/
-  return matchesMarker(localName) || readOnlyVerb.test(name)
+    markers.some((marker) => candidate === marker || candidate.startsWith(`${marker}_`))
+  const readOnlyVerb = /^(?:get_|list_|read_|search_|inspect_|snapshot)/
+  return matchesMarker(localName) || readOnlyVerb.test(localName)
 }
 
 function isShellProgressCommand(toolInput: unknown) {

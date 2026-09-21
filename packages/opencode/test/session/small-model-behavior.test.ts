@@ -79,6 +79,8 @@ describe("small-model post-edit verification", () => {
     expect(isInspectionToolName("brave-devtools.get_network_request")).toBe(true)
     expect(isInspectionToolName("brave-devtools_get_network_request")).toBe(true)
     expect(isInspectionToolName("brave-devtools.click")).toBe(false)
+    expect(isInspectionToolName("foo.click_and_get_result")).toBe(false)
+    expect(isInspectionToolName("foo.update_and_get_status")).toBe(false)
     expect(isProgressAction("read_file", { filePath: "src/app.ts" })).toBe(false)
     expect(isProgressAction("brave-devtools.get_network_request")).toBe(false)
     expect(isProgressAction("brave-devtools_get_network_request")).toBe(false)

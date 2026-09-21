@@ -1339,15 +1339,17 @@ const layer = Layer.effect(
             })
 
             if (handle.metrics.progressActionSeen ?? handle.metrics.meaningfulAction) actionSeen = true
-            if (handle.metrics.filesChanged.length > 0) {
-              filesChangedDuringTask = true
+            if (handle.metrics.filesChanged.length > 0) filesChangedDuringTask = true
+            if (verification?.enabled === true) {
               for (const file of handle.metrics.filesChanged) verificationFilesChanged.add(file)
+              if (!taskStartSnapshot) {
+                const turnVerificationBundle = handle.getVerificationBundle
+                  ? yield* handle.getVerificationBundle()
+                  : { files: handle.metrics.filesChanged, diff: "" }
+                for (const file of turnVerificationBundle.files) verificationFilesChanged.add(file)
+                if (turnVerificationBundle.diff.trim()) verificationDiffs.add(turnVerificationBundle.diff)
+              }
             }
-            const turnVerificationBundle = handle.getVerificationBundle
-              ? yield* handle.getVerificationBundle()
-              : { files: handle.metrics.filesChanged, diff: "" }
-            for (const file of turnVerificationBundle.files) verificationFilesChanged.add(file)
-            if (turnVerificationBundle.diff.trim()) verificationDiffs.add(turnVerificationBundle.diff)
 
             if (structured !== undefined) {
               handle.message.structured = structured

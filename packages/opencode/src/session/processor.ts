@@ -25,7 +25,7 @@ import { isRecord } from "@/util/record"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
-import { codeModeMcpToolCalls, isMcpToolName, isProgressAction } from "./small-model-behavior"
+import { codeModeMcpToolCalls, isInspectionToolName, isMcpToolName, isProgressAction } from "./small-model-behavior"
 
 const DOOM_LOOP_THRESHOLD = 3
 export type Result = "compact" | "stop" | "continue"
@@ -328,8 +328,8 @@ const layer = Layer.effect(
         const childTools = name === "execute" ? codeModeMcpToolCalls(input.metadata) : []
         if (childTools.length > 0) {
           for (const child of childTools) {
-            if (isMcpToolName(child.tool)) ctx.mcpCalls++
-            if (child.status === "completed" && isProgressAction(child.tool, child.input)) {
+            ctx.mcpCalls++
+            if (child.status === "completed" && !isInspectionToolName(child.tool)) {
               ctx.progressActionSeen = true
               ctx.meaningfulAction = true
             } else {
