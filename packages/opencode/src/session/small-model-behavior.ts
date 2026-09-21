@@ -55,3 +55,69 @@ export function compactOriginalUserText(text: string, max = 12_000) {
   const normalized = text.trim()
   return normalized.length <= max ? normalized : `${normalized.slice(0, max)}\n[original request truncated]`
 }
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+export function isInspectionToolName(toolName: string) {
+  const name = toolName.toLowerCase()
+  return [
+    "read",
+    "read_file",
+    "cat",
+    "grep",
+    "glob",
+    "find",
+    "ls",
+    "dir",
+    "list",
+    "get_page",
+    "get_pages",
+    "snapshot",
+    "inspect",
+    "search",
+    "stat",
+    "status",
+    "diff",
+    "log",
+    "pwd",
+  ].some((marker) => name === marker || name.endsWith(`_${marker}`) || name.includes(`_${marker}_`))
+}
+
+function isShellProgressCommand(toolInput: unknown) {
+  if (!isRecord(toolInput) || typeof toolInput.command !== "string") return false
+  const command = toolInput.command
+  if (/\b(cat|type|get-content|rg|grep|find|ls|dir|pwd|git\s+(status|diff|log|show))\b/i.test(command)) return false
+  return /\b(test|check|verify|build|compile|write|edit|patch|apply|touch|mkdir|mv|cp|rm|set-content|add-content)\b/i.test(
+    command,
+  )
+}
+
+export function isMcpToolName(toolName: string) {
+  const name = toolName.toLowerCase()
+  return name.includes("__") || name.startsWith("mcp") || name.includes("brave-devtools")
+}
+
+export function isProgressAction(toolName: string, toolInput?: unknown) {
+  const name = toolName.toLowerCase()
+  if (name === "edit" || name === "write" || name === "write_file" || name.includes("apply_patch")) return true
+  if (name === "bash" || name === "shell" || name === "powershell" || name === "pwsh" || name === "cmd" || name === "terminal") {
+    return isShellProgressCommand(toolInput)
+  }
+  if (isMcpToolName(name)) return !isInspectionToolName(name)
+  return false
+}
+
+export function codeModeMcpToolNames(metadata: unknown) {
+  if (!isRecord(metadata) || !Array.isArray(metadata.toolCalls)) return []
+  return metadata.toolCalls.flatMap((call) => {
+    if (!isRecord(call) || typeof call.tool !== "string") return []
+    return [call.tool]
+  })
+}
+
+export function compactVerificationDiff(text: string, max = 16_000) {
+  const normalized = text.trim()
+  return normalized.length <= max ? normalized : `${normalized.slice(0, max)}\n[current diff truncated]`
+}

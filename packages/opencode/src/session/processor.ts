@@ -25,6 +25,7 @@ import { isRecord } from "@/util/record"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
+import { codeModeMcpToolNames, isMcpToolName, isProgressAction } from "./small-model-behavior"
 
 const DOOM_LOOP_THRESHOLD = 3
 export type Result = "compact" | "stop" | "continue"
@@ -47,6 +48,8 @@ export interface Handle {
   readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<Result>
   readonly metrics: {
     readonly meaningfulAction: boolean
+    readonly progressActionSeen?: boolean
+    readonly inspectionSeen?: boolean
     readonly toolCalls: number
     readonly mcpCalls: number
     readonly shellCommands: number
@@ -54,6 +57,7 @@ export interface Handle {
     readonly repeatedUnchangedReads: number
     readonly filesChanged: readonly string[]
   }
+  readonly getVerificationBundle?: () => Effect.Effect<{ files: readonly string[]; diff: string }>
 }
 
 type Input = {
@@ -83,6 +87,8 @@ interface ProcessorContext extends Input {
   reasoningMap: Record<string, SessionV1.ReasoningPart>
   actionCallIDs: Set<string>
   meaningfulAction: boolean
+  progressActionSeen: boolean
+  inspectionSeen: boolean
   toolCalls: number
   mcpCalls: number
   shellCommands: number
@@ -90,6 +96,7 @@ interface ProcessorContext extends Input {
   repeatedUnchangedReads: number
   readKeys: Set<string>
   filesChanged: Set<string>
+  patches: Array<{ hash: string; files: readonly string[] }>
 }
 
 type StreamEvent = LLMEvent
@@ -131,6 +138,8 @@ const layer = Layer.effect(
         reasoningMap: {},
         actionCallIDs: new Set(),
         meaningfulAction: false,
+        progressActionSeen: false,
+        inspectionSeen: false,
         toolCalls: 0,
         mcpCalls: 0,
         shellCommands: 0,
@@ -138,6 +147,7 @@ const layer = Layer.effect(
         repeatedUnchangedReads: 0,
         readKeys: new Set(),
         filesChanged: new Set(),
+        patches: [],
       }
       let aborted = false
 
@@ -280,19 +290,12 @@ const layer = Layer.effect(
       })
 
       const recordAction = (input: { id: string; name: string; toolInput?: unknown }) => {
-        ctx.meaningfulAction = true
         const name = input.name.toLowerCase()
         const alreadyRecorded = ctx.actionCallIDs.has(input.id)
         // tool-input-start/delta events arrive before tool-call and do not
         // necessarily carry the decoded arguments. Enrich the action record
         // when the later tool-call supplies them instead of discarding it as
         // a duplicate.
-        if (name === "edit" || name === "write" || name === "write_file" || name.includes("apply_patch")) {
-          if (isRecord(input.toolInput)) {
-            const file = input.toolInput.filePath ?? input.toolInput.path ?? input.toolInput.file
-            if (typeof file === "string") ctx.filesChanged.add(file)
-          }
-        }
         if (alreadyRecorded) {
           if ((name === "read" || name.includes("read_file") || name === "cat") && input.toolInput !== undefined) {
             const key = JSON.stringify(input.toolInput)
@@ -312,12 +315,49 @@ const layer = Layer.effect(
           }
         }
         if (["bash", "shell", "powershell", "pwsh", "cmd", "terminal"].includes(name)) ctx.shellCommands++
-        if (name.includes("__") || name.startsWith("mcp") || name.includes("brave-devtools")) ctx.mcpCalls++
       }
 
       const recordChangedFiles = (files: readonly string[]) => {
+        if (files.length > 0) ctx.progressActionSeen = true
+        ctx.meaningfulAction = ctx.progressActionSeen
         for (const file of files) ctx.filesChanged.add(file)
       }
+
+      const recordSuccessfulAction = (input: { name: string; toolInput?: unknown; metadata: Record<string, any> }) => {
+        const name = input.name.toLowerCase()
+        const childTools = name === "execute" ? codeModeMcpToolNames(input.metadata) : []
+        const toolNames = childTools.length > 0 ? childTools : [input.name]
+        for (const toolName of toolNames) {
+          if (isMcpToolName(toolName)) ctx.mcpCalls++
+          if (isProgressAction(toolName, input.toolInput)) {
+            ctx.progressActionSeen = true
+            ctx.meaningfulAction = true
+          } else {
+            ctx.inspectionSeen = true
+          }
+        }
+
+        if (name === "edit" || name === "write" || name === "write_file" || name.includes("apply_patch")) {
+          if (isRecord(input.toolInput)) {
+            const file = input.toolInput.filePath ?? input.toolInput.path ?? input.toolInput.file
+            if (typeof file === "string") ctx.filesChanged.add(file)
+          }
+        }
+        const metadataFiles = input.metadata.files
+        if (Array.isArray(metadataFiles)) {
+          for (const file of metadataFiles) if (typeof file === "string") ctx.filesChanged.add(file)
+        }
+      }
+
+      const getVerificationBundle = Effect.fn("SessionProcessor.getVerificationBundle")(function* () {
+        const diffs = yield* Effect.forEach(ctx.patches, (patch) =>
+          snapshot.diff(patch.hash).pipe(Effect.catch(() => Effect.succeed(""))),
+        )
+        return {
+          files: [...ctx.filesChanged],
+          diff: diffs.filter((diff) => diff.trim().length > 0).join("\n"),
+        }
+      })
 
       const isFilePart = (value: unknown): value is SessionV1.FilePart => Schema.is(SessionV1.FilePart)(value)
 
@@ -459,6 +499,8 @@ const layer = Layer.effect(
               return
             }
             const rawOutput = toolResultOutput(value)
+            const toolInput = toolCall && "input" in toolCall.part.state ? toolCall.part.state.input : undefined
+            recordSuccessfulAction({ name: value.name, toolInput, metadata: rawOutput.metadata })
             const normalized = yield* Effect.forEach(rawOutput.attachments ?? [], (attachment) =>
               attachment.mime.startsWith("image/")
                 ? image.normalize(attachment).pipe(
@@ -542,6 +584,7 @@ const layer = Layer.effect(
             if (ctx.snapshot) {
               const patch = yield* snapshot.patch(ctx.snapshot)
               if (patch.files.length) {
+                ctx.patches.push(patch)
                 recordChangedFiles(patch.files)
                 yield* session.updatePart({
                   id: PartID.ascending(),
@@ -685,6 +728,8 @@ const layer = Layer.effect(
           sessionID: ctx.sessionID,
           messageID: ctx.assistantMessage.id,
           meaningfulAction: ctx.meaningfulAction,
+          progressActionSeen: ctx.progressActionSeen,
+          inspectionSeen: ctx.inspectionSeen,
           toolCalls: ctx.toolCalls,
           mcpCalls: ctx.mcpCalls,
           shellCommands: ctx.shellCommands,
@@ -790,6 +835,8 @@ const layer = Layer.effect(
         get metrics() {
           return {
             meaningfulAction: ctx.meaningfulAction,
+            progressActionSeen: ctx.progressActionSeen,
+            inspectionSeen: ctx.inspectionSeen,
             toolCalls: ctx.toolCalls,
             mcpCalls: ctx.mcpCalls,
             shellCommands: ctx.shellCommands,
@@ -798,6 +845,7 @@ const layer = Layer.effect(
             filesChanged: [...ctx.filesChanged],
           }
         },
+        getVerificationBundle,
       } satisfies Handle
     })
 

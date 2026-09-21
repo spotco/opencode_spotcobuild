@@ -59,6 +59,7 @@ import { LLMEvent } from "@opencode-ai/llm"
 import {
   ACTION_WATCHDOG_MARKER,
   VERIFICATION_MARKER,
+  compactVerificationDiff,
   compactOriginalUserText,
   shouldTriggerActionWatchdog,
   shouldTriggerPostEditVerification,
@@ -1097,8 +1098,20 @@ const layer = Layer.effect(
         let verificationTurns = 0
         let verificationTriggered = false
         let filesChangedDuringTask = false
-        let rootUserText = ""
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+        const initialMessages = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
+          Effect.provideService(Database.Service, database),
+        )
+        const rootUserMessage = initialMessages.findLast(
+          (message) =>
+            message.info.role === "user" &&
+            message.parts.some((part) => part.type === "text" && part.synthetic !== true),
+        )
+        const rootUserText =
+          rootUserMessage?.parts
+            .filter((part): part is SessionV1.TextPart => part.type === "text" && part.synthetic !== true)
+            .map((part) => part.text)
+            .join("\n") ?? ""
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
@@ -1111,19 +1124,6 @@ const layer = Layer.effect(
           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
-
-          if (!rootUserText) {
-            const original = msgs.find(
-              (message) =>
-                message.info.role === "user" &&
-                message.parts.some((part) => part.type === "text" && part.synthetic !== true),
-            )
-            rootUserText =
-              original?.parts
-                .filter((part): part is SessionV1.TextPart => part.type === "text" && part.synthetic !== true)
-                .map((part) => part.text)
-                .join("\n") ?? ""
-          }
 
           const lastAssistantMsg = msgs.findLast(
             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
@@ -1329,7 +1329,7 @@ const layer = Layer.effect(
                 : undefined,
             })
 
-            if (handle.metrics.meaningfulAction) actionSeen = true
+            if (handle.metrics.progressActionSeen ?? handle.metrics.meaningfulAction) actionSeen = true
             if (handle.metrics.filesChanged.length > 0) filesChangedDuringTask = true
 
             if (structured !== undefined) {
@@ -1426,10 +1426,17 @@ const layer = Layer.effect(
               ) {
                 verificationTriggered = true
                 verificationPasses++
+                const verificationBundle = handle.getVerificationBundle
+                  ? yield* handle.getVerificationBundle()
+                  : { files: handle.metrics.filesChanged, diff: "" }
+                const changedFiles = [...new Set([...handle.metrics.filesChanged, ...verificationBundle.files])]
+                const diff = compactVerificationDiff(verificationBundle.diff)
                 yield* Effect.logInfo("small-model post-edit verification triggered", {
                   sessionID,
                   pass: verificationPasses,
                   maxTokens: verification?.max_tokens ?? 2048,
+                  changedFiles: changedFiles.length,
+                  diffChars: diff.length,
                 })
                 yield* createUserMessage({
                   sessionID,
@@ -1439,7 +1446,7 @@ const layer = Layer.effect(
                     {
                       type: "text",
                       synthetic: true,
-                      text: `${VERIFICATION_MARKER}\nOriginal request:\n${compactOriginalUserText(rootUserText)}\n\nVerify that every reported symptom or requested behavior is actually addressed by the current changes. Inspect the current diff and relevant changed code. If anything remains unexplained or unfixed, correct it and run targeted verification. Syntax alone is insufficient. Do not make unrelated changes. This is the only verification pass.`,
+                      text: `${VERIFICATION_MARKER}\nOriginal request:\n${compactOriginalUserText(rootUserText)}\n\nChanged files (successful edits in this run):\n${changedFiles.length > 0 ? changedFiles.map((file) => `- ${file}`).join("\n") : "(none recorded)"}\n\nCurrent diff (bounded):\n${diff || "(diff unavailable; inspect the listed files only if needed)"}\n\nVerify that every reported symptom or requested behavior is actually addressed by the current changes. Check the implementation, not just syntax. If anything remains unexplained or unfixed, correct it and run targeted verification. Do not make unrelated changes. This is the only verification pass.`,
                     },
                   ],
                 }).pipe(Effect.orDie)

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { classifyBrowserProcessControl } from "../../src/tool/shell"
+import { classifyBrowserProcessControl, hasConnectedManagedMcp } from "../../src/tool/shell"
 
 describe("browser process control guard", () => {
   test("classifies browser termination", () => {
@@ -15,5 +15,11 @@ describe("browser process control guard", () => {
   test("does not classify normal browser use", () => {
     expect(classifyBrowserProcessControl("open https://brave.com")).toBeUndefined()
     expect(classifyBrowserProcessControl("rg chrome source.ts")).toBeUndefined()
+  })
+
+  test("only reports a managed browser when its MCP status is connected", () => {
+    expect(hasConnectedManagedMcp({ mcpStatus: { "brave-devtools": { status: "connected" } } }, ["brave-devtools"])).toBe(true)
+    expect(hasConnectedManagedMcp({ mcpStatus: { "brave-devtools": { status: "failed" } } }, ["brave-devtools"])).toBe(false)
+    expect(hasConnectedManagedMcp({}, ["brave-devtools"])).toBe(false)
   })
 })

@@ -82,6 +82,15 @@ export function classifyBrowserProcessControl(
   return undefined
 }
 
+export function hasConnectedManagedMcp(extra: Tool.Context["extra"], managedServers: readonly string[]) {
+  const statuses = extra?.mcpStatus
+  if (typeof statuses !== "object" || statuses === null || Array.isArray(statuses)) return false
+  return managedServers.some((server) => {
+    const status = (statuses as Record<string, unknown>)[server]
+    return typeof status === "object" && status !== null && !Array.isArray(status) && (status as { status?: unknown }).status === "connected"
+  })
+}
+
 type Part = {
   type: string
   text: string
@@ -634,12 +643,14 @@ export const ShellTool = Tool.define(
               }
               const guard = cfg.experimental?.browser_process_guard
               const browserControl = guard?.enabled === true ? classifyBrowserProcessControl(params.command) : undefined
-              if (browserControl && (guard?.managed_servers?.length ?? 0) > 0) {
+              const managedServers = guard?.managed_servers ?? []
+              const browserMcpAvailable = hasConnectedManagedMcp(ctx.extra, managedServers)
+              if (browserControl && browserMcpAvailable) {
                 yield* Effect.logWarning("browser process control requested", {
                   sessionID: ctx.sessionID,
                   kind: browserControl.kind,
                   reason: browserControl.reason,
-                  managedServers: guard?.managed_servers,
+                  managedServers,
                 })
                 yield* ctx.ask({
                   permission: "browser_process_control",
@@ -648,7 +659,8 @@ export const ShellTool = Tool.define(
                   metadata: {
                     command: params.command,
                     reason: browserControl.reason,
-                    managedServers: guard?.managed_servers,
+                    managedServers,
+                    browserMcpAvailable,
                     message:
                       "Use the existing managed browser MCP session unless the user explicitly requested process control.",
                   },

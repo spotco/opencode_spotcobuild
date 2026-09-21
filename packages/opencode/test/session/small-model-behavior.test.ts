@@ -4,6 +4,10 @@ import {
   shouldTriggerActionWatchdog,
   shouldTriggerPostEditVerification,
   shouldStopPostEditVerificationTurn,
+  codeModeMcpToolNames,
+  compactVerificationDiff,
+  isInspectionToolName,
+  isProgressAction,
 } from "../../src/session/small-model-behavior"
 
 describe("small-model action watchdog", () => {
@@ -65,5 +69,21 @@ describe("small-model post-edit verification", () => {
     expect(shouldStopPostEditVerificationTurn({ finish: "tool-calls", turns: 8, maxTurns: 8 })).toBe(true)
     expect(shouldStopPostEditVerificationTurn({ finish: "tool-calls", turns: 7, maxTurns: 8 })).toBe(false)
     expect(shouldStopPostEditVerificationTurn({ finish: "stop", turns: 8, maxTurns: 8 })).toBe(false)
+  })
+
+  test("keeps inspection separate from successful progress actions", () => {
+    expect(isInspectionToolName("read_file")).toBe(true)
+    expect(isProgressAction("read_file", { filePath: "src/app.ts" })).toBe(false)
+    expect(isProgressAction("edit", { filePath: "src/app.ts" })).toBe(true)
+    expect(isProgressAction("shell", { command: "git status --short" })).toBe(false)
+    expect(isProgressAction("shell", { command: "npm test" })).toBe(true)
+  })
+
+  test("extracts Code Mode child MCP calls and bounds the verification diff", () => {
+    expect(codeModeMcpToolNames({ toolCalls: [{ tool: "brave-devtools_get_page" }, { tool: "brave-devtools_click" }] })).toEqual([
+      "brave-devtools_get_page",
+      "brave-devtools_click",
+    ])
+    expect(compactVerificationDiff("x".repeat(10), 5)).toContain("[current diff truncated]")
   })
 })
