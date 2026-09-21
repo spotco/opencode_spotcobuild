@@ -68,14 +68,22 @@ const layer = Layer.effect(
     return Service.of({
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
         const ctx = yield* InstanceState.context
-        // SpotcoBuild: v1.18.31 can surface undefined holes from Reference.list();
-        // sorting those throws TypeError on a.name and aborts the prompt loop.
+        // SpotcoBuild: v1.18.31 Reference/location resolution can Die with
+        // TypeError on a.name (undefined entries while sorting/decoding).
+        // Treat reference discovery as best-effort so prompts still run.
         const references = yield* Effect.gen(function* () {
           return (yield* (yield* Reference.Service).list()).filter(
             (reference): reference is NonNullable<typeof reference> =>
               reference != null && typeof reference.name === "string" && reference.description !== undefined,
           )
-        }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
+        }).pipe(
+          Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("skipping project references in system prompt", { cause }).pipe(
+              Effect.as([] as const),
+            ),
+          ),
+        )
         return [
           [
             `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
