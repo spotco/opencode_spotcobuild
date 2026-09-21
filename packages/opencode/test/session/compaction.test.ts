@@ -205,6 +205,15 @@ function fake(
     updateToolCall: Effect.fn("TestSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
     completeToolCall: Effect.fn("TestSessionProcessor.completeToolCall")(() => Effect.void),
     process: Effect.fn("TestSessionProcessor.process")(() => Effect.succeed(result)),
+    metrics: {
+      meaningfulAction: false,
+      toolCalls: 0,
+      mcpCalls: 0,
+      shellCommands: 0,
+      fileReads: 0,
+      repeatedUnchangedReads: 0,
+      filesChanged: [],
+    },
   } satisfies SessionProcessorModule.SessionProcessor.Handle
 }
 
@@ -832,9 +841,7 @@ describe("session.compaction.prune", () => {
             .flatMap((msg) => msg.parts)
             .filter((part): part is SessionV1.ToolPart => part.type === "tool")
 
-          const olderTool = tools.find(
-            (part) => part.state.status === "completed" && part.state.output.startsWith("o"),
-          )
+          const olderTool = tools.find((part) => part.state.status === "completed" && part.state.output.startsWith("o"))
           const midTool = tools.find((part) => part.state.status === "completed" && part.state.output.startsWith("m"))
           expect(olderTool?.state.status === "completed" && olderTool.state.time.compacted).toBeUndefined()
           expect(midTool?.state.status === "completed" && midTool.state.time.compacted).toBeNumber()

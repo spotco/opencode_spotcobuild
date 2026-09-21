@@ -113,6 +113,24 @@ const live: Layer.Layer<
         isWorkflow,
       })
 
+      const chatTemplateKwargs = prepared.params.options.chat_template_kwargs
+      yield* Effect.logInfo("llm request sampling", {
+        providerID: input.model.providerID,
+        modelID: input.model.id,
+        "session.id": input.sessionID,
+        temperature: prepared.params.temperature,
+        top_p: prepared.params.topP,
+        top_k: prepared.params.topK,
+        min_p: prepared.params.options.min_p,
+        repetition_penalty: prepared.params.options.repetition_penalty,
+        presence_penalty: prepared.params.presencePenalty ?? prepared.params.options.presence_penalty,
+        max_tokens: prepared.params.maxOutputTokens,
+        enable_thinking:
+          prepared.params.options.enable_thinking ??
+          chatTemplateKwargs?.enable_thinking ??
+          prepared.params.options.chat_template_args?.enable_thinking,
+      })
+
       // Wire up toolExecutor for DWS workflow models so that tool calls
       // from the workflow service are executed via opencode's tool system
       // and results sent back over the WebSocket.
@@ -314,6 +332,7 @@ const live: Layer.Layer<
           temperature: prepared.params.temperature,
           topP: prepared.params.topP,
           topK: prepared.params.topK,
+          presencePenalty: prepared.params.presencePenalty,
           providerOptions: ProviderTransform.providerOptions(input.model, prepared.params.options),
           activeTools: Object.keys(prepared.tools).filter((x) => x !== "invalid"),
           tools: prepared.tools,

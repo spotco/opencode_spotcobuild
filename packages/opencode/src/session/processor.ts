@@ -45,6 +45,15 @@ export interface Handle {
     },
   ) => Effect.Effect<void>
   readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<Result>
+  readonly metrics: {
+    readonly meaningfulAction: boolean
+    readonly toolCalls: number
+    readonly mcpCalls: number
+    readonly shellCommands: number
+    readonly fileReads: number
+    readonly repeatedUnchangedReads: number
+    readonly filesChanged: readonly string[]
+  }
 }
 
 type Input = {
@@ -72,6 +81,15 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: SessionV1.TextPart | undefined
   reasoningMap: Record<string, SessionV1.ReasoningPart>
+  actionCallIDs: Set<string>
+  meaningfulAction: boolean
+  toolCalls: number
+  mcpCalls: number
+  shellCommands: number
+  fileReads: number
+  repeatedUnchangedReads: number
+  readKeys: Set<string>
+  filesChanged: Set<string>
 }
 
 type StreamEvent = LLMEvent
@@ -111,6 +129,15 @@ const layer = Layer.effect(
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        actionCallIDs: new Set(),
+        meaningfulAction: false,
+        toolCalls: 0,
+        mcpCalls: 0,
+        shellCommands: 0,
+        fileReads: 0,
+        repeatedUnchangedReads: 0,
+        readKeys: new Set(),
+        filesChanged: new Set(),
       }
       let aborted = false
 
@@ -252,6 +279,46 @@ const layer = Layer.effect(
         return { call: ctx.toolcalls[input.id], part }
       })
 
+      const recordAction = (input: { id: string; name: string; toolInput?: unknown }) => {
+        ctx.meaningfulAction = true
+        const name = input.name.toLowerCase()
+        const alreadyRecorded = ctx.actionCallIDs.has(input.id)
+        // tool-input-start/delta events arrive before tool-call and do not
+        // necessarily carry the decoded arguments. Enrich the action record
+        // when the later tool-call supplies them instead of discarding it as
+        // a duplicate.
+        if (name === "edit" || name === "write" || name === "write_file" || name.includes("apply_patch")) {
+          if (isRecord(input.toolInput)) {
+            const file = input.toolInput.filePath ?? input.toolInput.path ?? input.toolInput.file
+            if (typeof file === "string") ctx.filesChanged.add(file)
+          }
+        }
+        if (alreadyRecorded) {
+          if ((name === "read" || name.includes("read_file") || name === "cat") && input.toolInput !== undefined) {
+            const key = JSON.stringify(input.toolInput)
+            if (ctx.readKeys.has(key)) ctx.repeatedUnchangedReads++
+            ctx.readKeys.add(key)
+          }
+          return
+        }
+        ctx.actionCallIDs.add(input.id)
+        ctx.toolCalls++
+        if (name === "read" || name.includes("read_file") || name === "cat") {
+          ctx.fileReads++
+          if (input.toolInput !== undefined) {
+            const key = JSON.stringify(input.toolInput)
+            if (ctx.readKeys.has(key)) ctx.repeatedUnchangedReads++
+            ctx.readKeys.add(key)
+          }
+        }
+        if (["bash", "shell", "powershell", "pwsh", "cmd", "terminal"].includes(name)) ctx.shellCommands++
+        if (name.includes("__") || name.startsWith("mcp") || name.includes("brave-devtools")) ctx.mcpCalls++
+      }
+
+      const recordChangedFiles = (files: readonly string[]) => {
+        for (const file of files) ctx.filesChanged.add(file)
+      }
+
       const isFilePart = (value: unknown): value is SessionV1.FilePart => Schema.is(SessionV1.FilePart)(value)
 
       const toolResultOutput = (
@@ -316,14 +383,17 @@ const layer = Layer.effect(
             if (ctx.assistantMessage.summary) {
               throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
             }
+            recordAction(value)
             yield* ensureToolCall(value)
             return
 
           case "tool-input-delta":
+            recordAction(value)
             yield* ensureToolCall(value)
             return
 
           case "tool-input-end": {
+            recordAction(value)
             yield* ensureToolCall(value)
             return
           }
@@ -332,6 +402,7 @@ const layer = Layer.effect(
             if (ctx.assistantMessage.summary) {
               throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
             }
+            recordAction({ id: value.id, name: value.name, toolInput: value.input })
             yield* ensureToolCall(value)
             const input = isRecord(value.input) ? value.input : { value: value.input }
             yield* updateToolCall(value.id, (match) => ({
@@ -471,6 +542,7 @@ const layer = Layer.effect(
             if (ctx.snapshot) {
               const patch = yield* snapshot.patch(ctx.snapshot)
               if (patch.files.length) {
+                recordChangedFiles(patch.files)
                 yield* session.updatePart({
                   id: PartID.ascending(),
                   messageID: ctx.assistantMessage.id,
@@ -554,6 +626,7 @@ const layer = Layer.effect(
         if (ctx.snapshot) {
           const patch = yield* snapshot.patch(ctx.snapshot)
           if (patch.files.length) {
+            recordChangedFiles(patch.files)
             yield* session.updatePart({
               id: PartID.ascending(),
               messageID: ctx.assistantMessage.id,
@@ -608,6 +681,17 @@ const layer = Layer.effect(
         ctx.toolcalls = {}
         ctx.assistantMessage.time.completed = Date.now()
         yield* session.updateMessage(ctx.assistantMessage)
+        yield* Effect.logInfo("session action metrics", {
+          sessionID: ctx.sessionID,
+          messageID: ctx.assistantMessage.id,
+          meaningfulAction: ctx.meaningfulAction,
+          toolCalls: ctx.toolCalls,
+          mcpCalls: ctx.mcpCalls,
+          shellCommands: ctx.shellCommands,
+          fileReads: ctx.fileReads,
+          repeatedUnchangedReads: ctx.repeatedUnchangedReads,
+          filesChanged: ctx.filesChanged.size,
+        })
       })
 
       const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
@@ -703,6 +787,17 @@ const layer = Layer.effect(
         updateToolCall,
         completeToolCall,
         process,
+        get metrics() {
+          return {
+            meaningfulAction: ctx.meaningfulAction,
+            toolCalls: ctx.toolCalls,
+            mcpCalls: ctx.mcpCalls,
+            shellCommands: ctx.shellCommands,
+            fileReads: ctx.fileReads,
+            repeatedUnchangedReads: ctx.repeatedUnchangedReads,
+            filesChanged: [...ctx.filesChanged],
+          }
+        },
       } satisfies Handle
     })
 

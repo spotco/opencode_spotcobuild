@@ -45,6 +45,7 @@ export type Prepared = {
     readonly temperature?: number
     readonly topP?: number
     readonly topK?: number
+    readonly presencePenalty?: number
     readonly maxOutputTokens?: number
     readonly options: Record<string, any>
   }
@@ -63,9 +64,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
       ? input.agent.prompt.replace(RUNTIME_SYSTEM_MARKER, () => runtimeSystem)
       : [input.agent.prompt, runtimeSystem].filter((x) => x).join("\n")
     : [...SystemPrompt.provider(input.model), runtimeSystem].filter((x) => x).join("\n")
-  const system = [
-    prompt,
-  ]
+  const system = [prompt]
 
   const header = system[0]
   yield* input.plugin.trigger(
@@ -91,6 +90,21 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
         providerOptions: input.provider.options,
       })
   const options = mergeOptions(mergeOptions(mergeOptions(base, input.model.options), input.agent.options), variant)
+  // Local OpenAI-compatible servers accept llama.cpp sampler fields both as
+  // top-level chat-completions parameters and as provider-specific options.
+  // Keep cloud-provider transforms untouched, but make the local profile's
+  // intended recipe explicit in the request object so it is observable and
+  // cannot be silently lost between config generation and the SDK call.
+  const isLocalSampling =
+    input.model.api.npm === "@ai-sdk/openai-compatible" && input.model.providerID.endsWith("-local")
+  const localSampling = isLocalSampling
+    ? {
+        temperature: numberOption(options, "temperature"),
+        topP: numberOption(options, "top_p", "topP"),
+        topK: numberOption(options, "top_k", "topK"),
+        presencePenalty: numberOption(options, "presence_penalty", "presencePenalty"),
+      }
+    : undefined
   if (
     input.model.api.npm === "@ai-sdk/azure" &&
     (input.provider.options.useCompletionUrls || input.model.options.useCompletionUrls || options.useCompletionUrls)
@@ -131,11 +145,14 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
       message: input.user,
     },
     {
-      temperature: input.model.capabilities.temperature
-        ? (input.agent.temperature ?? ProviderTransform.temperature(input.model))
-        : undefined,
-      topP: input.agent.topP ?? ProviderTransform.topP(input.model),
-      topK: ProviderTransform.topK(input.model),
+      temperature: isLocalSampling
+        ? (input.agent.temperature ?? localSampling?.temperature)
+        : input.model.capabilities.temperature
+          ? (input.agent.temperature ?? ProviderTransform.temperature(input.model))
+          : undefined,
+      topP: input.agent.topP ?? localSampling?.topP ?? ProviderTransform.topP(input.model),
+      topK: localSampling?.topK ?? ProviderTransform.topK(input.model),
+      presencePenalty: localSampling?.presencePenalty,
       maxOutputTokens: seedMaxOutputTokens,
       options,
     },
@@ -230,6 +247,14 @@ function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission"
     Permission.merge(input.agent.permission, input.permission ?? []),
   )
   return Record.filter(input.tools, (_, k) => input.user.tools?.[k] !== false && !disabled.has(k))
+}
+
+function numberOption(options: Record<string, any>, ...keys: string[]) {
+  for (const key of keys) {
+    const value = options[key]
+    if (typeof value === "number" && Number.isFinite(value)) return value
+  }
+  return undefined
 }
 
 export function hasToolCalls(messages: ModelMessage[]): boolean {
