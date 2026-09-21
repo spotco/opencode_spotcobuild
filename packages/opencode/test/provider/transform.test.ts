@@ -590,6 +590,65 @@ describe("ProviderTransform.options - gpt-5 textVerbosity", () => {
     expect(result.tools.lookup.strict).toBe(false)
   })
 
+  test("clamps maxOutputTokens after chat.params tries to raise it", async () => {
+    const model = {
+      ...createGpt5Model("gpt-5.4"),
+      id: "openai/gpt-5.4",
+      providerID: "openai",
+      api: {
+        id: "gpt-5.4",
+        url: "https://api.openai.com",
+        npm: "@ai-sdk/openai",
+      },
+      limit: {
+        context: 200000,
+        input: 200000,
+        output: 100000,
+      },
+    }
+    const result = await Effect.runPromise(
+      LLMRequestPrep.prepare({
+        user: {
+          id: "msg_user-test",
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: "test",
+          model: { providerID: "openai", modelID: "gpt-5.4" },
+        } as any,
+        sessionID,
+        model,
+        agent: {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [],
+        } as any,
+        system: [],
+        messages: [{ role: "user", content: "Hello" }],
+        tools: {},
+        provider: { id: "openai", options: {} } as any,
+        auth: undefined,
+        plugin: {
+          trigger: (name: string, _input: unknown, output: any) =>
+            Effect.sync(() => {
+              if (name === "chat.params") {
+                output.maxOutputTokens = 8192
+              }
+              return output
+            }),
+          list: () => Effect.succeed([]),
+          init: () => Effect.void,
+        } as any,
+        flags: { outputTokenMax: 32_000, client: "test" } as any,
+        isWorkflow: false,
+        maxOutputTokens: 1024,
+      }),
+    )
+    expect(result.params.maxOutputTokens).toBe(1024)
+    expect(result.params.maxOutputTokens).toBeLessThanOrEqual(1024)
+  })
+
   test("gpt-5.1 should have textVerbosity set to low", () => {
     const model = createGpt5Model("gpt-5.1")
     const result = ProviderTransform.options({ model, sessionID, providerOptions: {} })

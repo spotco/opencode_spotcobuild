@@ -751,6 +751,101 @@ describe("session.message-v2.toModelMessage", () => {
     ])
   })
 
+  test("preserves truncation retrieval path after prune compaction", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const savedPath = "E:\\tmp\\tool_abc123"
+    const preview =
+      "line1\nline2\n\n...100 lines truncated...\n\nThe tool call succeeded but the output was truncated. Full output saved to: " +
+      savedPath +
+      "\nUse Grep to search the full content or Read with offset/limit to view specific sections."
+
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tool",
+          },
+        ] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: preview,
+              title: "Bash",
+              metadata: { truncated: true, outputPath: savedPath },
+              time: { start: 0, end: 1, compacted: 1 },
+            },
+          },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    const messages = await MessageV2.toModelMessages(input, model)
+    const toolResult = messages.find((m) => m.role === "tool")
+    expect(toolResult).toBeDefined()
+    const value = (toolResult as any).content[0].output.value as string
+    expect(value).toBe(`[old tool output cleared; full output: ${savedPath}]`)
+    expect(value).not.toContain("line1")
+    expect(value).not.toContain("...100 lines truncated...")
+  })
+
+  test("recovers retrieval path from output text when metadata lacks outputPath", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const savedPath = "/tmp/tool_from_text"
+    const output =
+      "...output truncated...\n\nFull output saved to: " + savedPath + "\n\npreview tail"
+
+    expect(MessageV2.toolOutputRetrievalPath({ output, metadata: {} })).toBe(savedPath)
+    expect(MessageV2.compactedToolOutputText({ output, metadata: {} })).toBe(
+      `[old tool output cleared; full output: ${savedPath}]`,
+    )
+
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run" }] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-2",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: {},
+              output,
+              title: "Bash",
+              metadata: { truncated: true },
+              time: { start: 0, end: 1, compacted: 99 },
+            },
+          },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    const messages = await MessageV2.toModelMessages(input, model)
+    const toolResult = messages.find((m) => m.role === "tool")
+    expect((toolResult as any).content[0].output.value).toBe(
+      `[old tool output cleared; full output: ${savedPath}]`,
+    )
+  })
+
   test("truncates tool output when requested", async () => {
     const userID = "m-user"
     const assistantID = "m-assistant"

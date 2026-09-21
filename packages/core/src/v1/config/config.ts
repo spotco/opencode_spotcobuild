@@ -164,7 +164,7 @@ export const Info = Schema.Struct({
       reserved: Schema.optional(NonNegativeInt).annotate({
         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
       }),
-      summary_max_tokens: Schema.optional(NonNegativeInt).annotate({
+      summary_max_tokens: Schema.optional(PositiveInt).annotate({
         description: "Maximum tokens for compaction summary generation (default: 4096 when unset)",
       }),
       prune_protect_tokens: Schema.optional(NonNegativeInt).annotate({

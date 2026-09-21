@@ -74,7 +74,12 @@ const serialize = (message: SessionV1.WithParts) => {
           (item) => `[Attached ${item.mime}: ${item.filename ?? "file"}]`,
         )
         const output = part.state.time.compacted
-          ? "[tool output cleared; full result retained on disk if truncated earlier]"
+          ? (() => {
+              const path = MessageV2.toolOutputRetrievalPath(part.state)
+              return path
+                ? `[old tool output cleared; full output: ${path}]`
+                : "[tool output cleared; full result retained on disk if truncated earlier]"
+            })()
           : truncate([part.state.output, ...attachments].join("\n"))
         return [call, `[Tool result]: ${output}`]
       }

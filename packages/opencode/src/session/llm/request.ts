@@ -112,6 +112,14 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
           ...input.messages,
         ]
 
+  const providerMax = ProviderTransform.maxOutputTokens(input.model, input.flags.outputTokenMax)
+  const seedMaxOutputTokens =
+    input.maxOutputTokens === undefined
+      ? providerMax
+      : providerMax === undefined || providerMax === null
+        ? input.maxOutputTokens
+        : Math.min(input.maxOutputTokens, providerMax)
+
   const params = yield* input.plugin.trigger(
     "chat.params",
     {
@@ -127,10 +135,19 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
         : undefined,
       topP: input.agent.topP ?? ProviderTransform.topP(input.model),
       topK: ProviderTransform.topK(input.model),
-      maxOutputTokens: input.maxOutputTokens ?? ProviderTransform.maxOutputTokens(input.model, input.flags.outputTokenMax),
+      maxOutputTokens: seedMaxOutputTokens,
       options,
     },
   )
+
+  // summary_max_tokens / explicit maxOutputTokens is a hard ceiling — plugins must not raise it.
+  if (input.maxOutputTokens !== undefined) {
+    let clamped = Math.min(params.maxOutputTokens ?? input.maxOutputTokens, input.maxOutputTokens)
+    if (providerMax !== undefined && providerMax !== null) {
+      clamped = Math.min(clamped, providerMax)
+    }
+    ;(params as { maxOutputTokens?: number }).maxOutputTokens = clamped
+  }
 
   const { headers } = yield* input.plugin.trigger(
     "chat.headers",
