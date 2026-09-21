@@ -81,7 +81,41 @@ const lastSegment = (uri: string) => {
 
 const dataUrl = (mime: string, base64: string) => `data:${mime};base64,${base64}`
 
-function projectMcpResult(result: CallToolResult, collect: (attachment: Attachment) => void): unknown {
+class McpValidationError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause })
+    this.name = "McpValidationError"
+  }
+}
+
+const isMcpValidationMessage = (message: string) =>
+  /(?:invalid\s+(?:argument|input|parameter|request)|validation\s+(?:error|failed)|schema\s+(?:error|validation)|missing\s+required|unknown\s+(?:field|property|argument|parameter)|additional\s+propert|unsupported\s+(?:field|argument|parameter)|must\s+(?:be|contain|include)|expected\s+.+\s+(?:got|received))/i.test(
+    message,
+  )
+
+const normalizeInvocationArgs = (value: unknown): string => {
+  if (Array.isArray(value)) return `[${value.map(normalizeInvocationArgs).join(",")}]`
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${normalizeInvocationArgs((value as Record<string, unknown>)[key])}`)
+      .join(",")}}`
+  }
+  return JSON.stringify(value) ?? String(value)
+}
+
+const labelMcpValue = (value: unknown): Record<string, unknown> => {
+  if (Array.isArray(value)) return { kind: "array", items: value, count: value.length }
+  if (value !== null && typeof value === "object") return { kind: "json", value }
+  if (value === null || value === undefined) return { kind: "null", value: null }
+  return { kind: "scalar", value }
+}
+
+function projectMcpResult(
+  result: CallToolResult,
+  collect: (attachment: Attachment) => void,
+  preserveStructured: boolean,
+): unknown {
   const text: string[] = []
   let files = 0
   let images = 0
@@ -115,13 +149,22 @@ function projectMcpResult(result: CallToolResult, collect: (attachment: Attachme
     }
   }
 
-  if (result.structuredContent !== undefined && result.structuredContent !== null) return result.structuredContent
-  if (text.length > 0) return text.join("\n")
+  if (result.structuredContent !== undefined && preserveStructured) return result.structuredContent
+  if (result.structuredContent !== undefined) return labelMcpValue(result.structuredContent)
+  if (text.length > 0) {
+    const value = text.join("\n")
+    return { kind: "text", text: value, length: value.length }
+  }
   if (files > 0) {
     const noun = files === images ? "image" : "file"
-    return `[${files} ${noun}${files === 1 ? "" : "s"} attached to the result]`
+    return {
+      kind: "files",
+      count: files,
+      images,
+      text: `[${files} ${noun}${files === 1 ? "" : "s"} attached to the result]`,
+    }
   }
-  return null
+  return { kind: "null", value: null }
 }
 
 type Run = (input: unknown) => Effect.Effect<unknown, unknown>
@@ -156,24 +199,31 @@ const invokeChildTool = Effect.fn("CodeMode.invokeChildTool")(function* (input: 
     yield* input.ctx.ask({ permission: input.entry.key, metadata: {}, patterns: ["*"], always: ["*"] })
     // Deliberately mirrors McpCatalog.convertTool's transport call so the MCP service stays free of tool-loop concerns.
     return yield* Effect.promise(async () => {
-      const raw = await input.entry.tool.client.callTool(
-        { name: input.entry.tool.def.name, arguments: input.args },
-        CallToolResultSchema,
-        {
-          resetTimeoutOnProgress: true,
-          signal: input.ctx.abort,
-          timeout: input.entry.tool.timeout,
-          // The MCP SDK only sends a progress token when this hook is present, enabling timeout resets.
-          onprogress: () => {},
-        },
-      )
-      if (raw.isError)
-        throw new Error(
+      let raw: CallToolResult
+      try {
+        raw = await input.entry.tool.client.callTool(
+          { name: input.entry.tool.def.name, arguments: input.args },
+          CallToolResultSchema,
+          {
+            resetTimeoutOnProgress: true,
+            signal: input.ctx.abort,
+            timeout: input.entry.tool.timeout,
+            // The MCP SDK only sends a progress token when this hook is present, enabling timeout resets.
+            onprogress: () => {},
+          },
+        )
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        throw isMcpValidationMessage(message) ? new McpValidationError(message, error) : error
+      }
+      if (raw.isError) {
+        const message =
           raw.content
             .flatMap((item) => (item.type === "text" ? [item.text] : []))
             .filter((text) => text.trim())
-            .join("\n\n") || "MCP tool returned an error",
-        )
+            .join("\n\n") || "MCP tool returned an error"
+        throw isMcpValidationMessage(message) ? new McpValidationError(message) : new Error(message)
+      }
       return raw
     })
   }).pipe(
@@ -225,21 +275,54 @@ export const CodeModeTool = Tool.define(
 
         const calls: CallEntry[] = []
         const attachments: Attachment[] = []
+        const recentValidationErrors = new Map<string, { message: string; at: number }>()
         const publish = () =>
           ctx.metadata({ title: CODE_MODE_TOOL, metadata: { toolCalls: calls.map((c) => ({ ...c })) } })
+
+        const liveSignature = (entry: CatalogEntry) => {
+          const preview = CodeMode.make({
+            tools: toolTree([entry], () => () => Effect.fail(toolError("Tool preview is not executable."))),
+          })
+          return preview.catalog().find((item) => item.path === entry.path)?.signature ?? entry.path
+        }
 
         let childCalls = 0
         const callTool = (entry: CatalogEntry) => (input: unknown) =>
           Effect.gen(function* () {
             childCalls += 1
+            const args = (input ?? {}) as Record<string, unknown>
+            const retryKey = `${entry.key}\u0000${normalizeInvocationArgs(args)}`
+            const previous = recentValidationErrors.get(retryKey)
+            if (previous !== undefined && Date.now() - previous.at < 60_000) {
+              return yield* Effect.fail(
+                toolError(
+                  `Identical invalid invocation blocked for ${entry.path}. Read the previous validation error, use tools.$codemode.search for the live signature, and change the arguments before retrying. Previous validation: ${previous.message}`,
+                ),
+              )
+            }
+            if (previous !== undefined) recentValidationErrors.delete(retryKey)
             const result = yield* invokeChildTool({
               plugin,
               entry,
-              args: (input ?? {}) as Record<string, unknown>,
+              args,
               callID: `${ctx.callID ?? entry.key}/${childCalls}`,
               ctx,
-            })
-            return projectMcpResult(result, (attachment: Attachment) => void attachments.push(attachment))
+            }).pipe(
+              Effect.catchCause((cause) => {
+                const error = Cause.squash(cause)
+                if (error instanceof McpValidationError) {
+                  const message = `${error.message}\nLive signature: ${liveSignature(entry)}`
+                  recentValidationErrors.set(retryKey, { message, at: Date.now() })
+                  return Effect.fail(toolError(message, error))
+                }
+                return Effect.fail(error)
+              }),
+            )
+            return projectMcpResult(
+              result,
+              (attachment: Attachment) => void attachments.push(attachment),
+              entry.tool.def.outputSchema !== undefined,
+            )
           }).pipe(
             Effect.catchCause((cause) => {
               if (Cause.hasInterruptsOnly(cause)) return Effect.interrupt

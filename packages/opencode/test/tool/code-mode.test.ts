@@ -315,7 +315,7 @@ describe("code mode execute", () => {
     })
 
     const output = await Effect.runPromise(
-      tool.execute({ code: "const r = await tools.greeter.hello({ name: 'world' }); return r.toUpperCase()" }, ctx),
+      tool.execute({ code: "const r = await tools.greeter.hello({ name: 'world' }); return r.text.toUpperCase()" }, ctx),
     )
 
     expect(seen).toEqual([{ name: "world" }])
@@ -325,7 +325,7 @@ describe("code mode execute", () => {
     ])
   })
 
-  test("exposes structured content as native data and composes multiple calls", async () => {
+  test("labels opaque structured content and composes multiple calls", async () => {
     const tool = await build({
       math_add: mcpTool("add", (args) => ({
         content: [],
@@ -338,8 +338,8 @@ describe("code mode execute", () => {
         {
           code: `
             const first = await tools.math.add({ a: 1, b: 2 })
-            const second = await tools.math.add({ a: first.sum, b: 10 })
-            return { total: second.sum }
+            const second = await tools.math.add({ a: first.value.sum, b: 10 })
+            return { total: second.value.sum }
           `,
         },
         ctx,
@@ -361,7 +361,7 @@ describe("code mode execute", () => {
 
     const output = await Effect.runPromise(
       tool.execute(
-        { code: "const [a, b] = await Promise.all([tools.echo.one({}), tools.echo.two({})]); return a + b" },
+        { code: "const [a, b] = await Promise.all([tools.echo.one({}), tools.echo.two({})]); return a.text + b.text" },
         ctx,
       ),
     )
@@ -391,6 +391,100 @@ describe("code mode execute", () => {
       tool.execute({ code: "try { await tools.bad.tool({}) } catch (e) { return 'caught: ' + e.message }" }, ctx),
     )
     expect(output.output).toBe("caught: server exploded")
+  })
+
+  test("labels text, arrays, scalars, empty results, and malformed JSON-looking text", async () => {
+    const tool = await build({
+      text_list: mcpTool("list", () => ({ content: [{ type: "text", text: "## Network requests\\n#1 /api" }] })),
+      empty_result: mcpTool("empty", () => ({ content: [] })),
+      json_array: mcpTool("array", () => ({ content: [], structuredContent: [{ id: 1 }, { id: 2 }] })),
+      scalar_value: mcpTool("scalar", () => ({ content: [], structuredContent: 7 })),
+      malformed_json: mcpTool("malformed", () => ({ content: [{ type: "text", text: "{not json" }] })),
+    })
+
+    const out = await Effect.runPromise(
+      tool.execute(
+        {
+          code: `
+            return {
+              text: await tools.text.list({}),
+              empty: await tools.empty.result({}),
+              array: await tools.json.array({}),
+              scalar: await tools.scalar.value({}),
+              malformed: await tools.malformed.json({})
+            }
+          `,
+        },
+        ctx,
+      ),
+    )
+
+    expect(JSON.parse(out.output)).toEqual({
+      text: { kind: "text", text: "## Network requests\\n#1 /api", length: 28 },
+      empty: { kind: "null", value: null },
+      array: { kind: "array", items: [{ id: 1 }, { id: 2 }], count: 2 },
+      scalar: { kind: "scalar", value: 7 },
+      malformed: { kind: "text", text: "{not json", length: 9 },
+    })
+  })
+
+  test("blocks an identical deterministic validation retry but allows corrected arguments", async () => {
+    let calls = 0
+    const tool = await build({
+      pages_list: mcpTool("list_pages", (args) => {
+        calls += 1
+        if (args.pageId === "bad") return { isError: true, content: [{ type: "text", text: "Validation error: pageId is not allowed" }] }
+        return { content: [{ type: "text", text: "ok" }] }
+      }),
+    })
+
+    const out = await Effect.runPromise(
+      tool.execute(
+        {
+          code: `
+            let first = ""
+            let second = ""
+            let corrected = ""
+            try { await tools.pages.list({ pageId: "bad" }) } catch (e) { first = e.message }
+            try { await tools.pages.list({ pageId: "bad" }) } catch (e) { second = e.message }
+            corrected = (await tools.pages.list({})).text
+            return { first, second, corrected }
+          `,
+        },
+        ctx,
+      ),
+    )
+    const result = JSON.parse(out.output)
+    expect(result.first).toContain("Validation error: pageId is not allowed")
+    expect(result.first).toContain("Live signature:")
+    expect(result.second).toContain("Identical invalid invocation blocked")
+    expect(result.corrected).toBe("ok")
+    expect(calls).toBe(2)
+  })
+
+  test("does not block a retry after a transient MCP failure", async () => {
+    let calls = 0
+    const tool = await build({
+      pages_list: mcpTool("list_pages", () => {
+        calls += 1
+        if (calls === 1) return { isError: true, content: [{ type: "text", text: "timeout" }] }
+        return { content: [{ type: "text", text: "recovered" }] }
+      }),
+    })
+
+    const out = await Effect.runPromise(
+      tool.execute(
+        {
+          code: `
+            try { await tools.pages.list({}) } catch {}
+            return (await tools.pages.list({})).text
+          `,
+        },
+        ctx,
+      ),
+    )
+    expect(out.output).toBe("recovered")
+    expect(calls).toBe(2)
   })
 
   test("asks permission before each child tool call", async () => {
@@ -485,7 +579,7 @@ describe("code mode execute", () => {
             let caught
             try { await tools.a.tool({}) } catch (e) { caught = e.message }
             const r = await tools.b.tool({})
-            return caught + " / " + r
+            return caught + " / " + r.text
           `,
         },
         ctx,
@@ -546,7 +640,7 @@ describe("code mode execute", () => {
     })
 
     const out = await Effect.runPromise(tool.execute({ code: "return await tools.shot.take({})" }, ctx))
-    expect(JSON.parse(out.output)).toEqual({ name: "shot.png" })
+    expect(JSON.parse(out.output)).toEqual({ kind: "json", value: { name: "shot.png" } })
     expect(out.attachments).toEqual([{ type: "file", mime: "image/png", url: "data:image/png;base64,PNGDATA" }])
     expect(out.output).not.toContain("PNGDATA")
   })
@@ -556,7 +650,12 @@ describe("code mode execute", () => {
       shot_take: mcpTool("take", () => ({ content: [{ type: "image", data: "PNGDATA", mimeType: "image/png" }] })),
     })
     const out = await Effect.runPromise(tool.execute({ code: "return await tools.shot.take({})" }, ctx))
-    expect(out.output).toBe("[1 image attached to the result]")
+    expect(JSON.parse(out.output)).toEqual({
+      kind: "files",
+      count: 1,
+      images: 1,
+      text: "[1 image attached to the result]",
+    })
     expect(out.attachments).toEqual([{ type: "file", mime: "image/png", url: "data:image/png;base64,PNGDATA" }])
   })
 
@@ -589,8 +688,8 @@ describe("code mode execute", () => {
     )
 
     expect(JSON.parse(out.output)).toEqual({
-      images: "[2 images attached to the result]",
-      mixed: "[2 files attached to the result]",
+      images: { kind: "files", count: 2, images: 2, text: "[2 images attached to the result]" },
+      mixed: { kind: "files", count: 2, images: 1, text: "[2 files attached to the result]" },
     })
     expect(out.output).not.toContain("PNG")
     expect(out.attachments).toEqual([
@@ -617,7 +716,11 @@ describe("code mode execute", () => {
     })
     const out = await Effect.runPromise(tool.execute({ code: "return await tools.docs.find({})" }, ctx))
 
-    expect(out.output).toBe("guide.pdf: https://example.com/guide.pdf\nnotes.md: file:///tmp/notes.md")
+    expect(JSON.parse(out.output)).toEqual({
+      kind: "text",
+      text: "guide.pdf: https://example.com/guide.pdf\nnotes.md: file:///tmp/notes.md",
+      length: 71,
+    })
     expect(out.attachments).toBeUndefined()
   })
 
@@ -735,7 +838,7 @@ describe("code mode permission visibility", () => {
     expect(denied.message).not.toContain("permission")
     expect(called).toEqual([])
 
-    const allowed = await Effect.runPromise(tool.execute({ code: "return await tools.github.list_issues({})" }, ctx))
+    const allowed = await Effect.runPromise(tool.execute({ code: "return (await tools.github.list_issues({})).text" }, ctx))
     expect(allowed.metadata.error).toBeUndefined()
     expect(allowed.output).toBe("ok")
   })
@@ -748,7 +851,7 @@ describe("code mode permission visibility", () => {
       ["github"],
       [askRule("github_list_issues")],
     )
-    const out = await Effect.runPromise(tool.execute({ code: "return await tools.github.list_issues({})" }, askCtx))
+    const out = await Effect.runPromise(tool.execute({ code: "return (await tools.github.list_issues({})).text" }, askCtx))
     expect(out.output).toBe("ok")
     expect(asked).toEqual(["github_list_issues"])
   })
