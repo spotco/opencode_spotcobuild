@@ -56,6 +56,7 @@ import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
+import { Snapshot } from "@/snapshot"
 import {
   ACTION_WATCHDOG_MARKER,
   VERIFICATION_MARKER,
@@ -64,6 +65,7 @@ import {
   shouldTriggerActionWatchdog,
   shouldTriggerPostEditVerification,
   shouldStopPostEditVerificationTurn,
+  verificationMessageWindow,
 } from "./small-model-behavior"
 
 // @ts-ignore
@@ -149,6 +151,7 @@ const layer = Layer.effect(
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
+    const snapshot = yield* Snapshot.Service
     const { db } = database
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
@@ -1097,8 +1100,12 @@ const layer = Layer.effect(
         let verificationPasses = 0
         let verificationTurns = 0
         let verificationTriggered = false
+        let verificationMessageID: MessageID | undefined
         let filesChangedDuringTask = false
+        const verificationFilesChanged = new Set<string>()
+        const verificationDiffs = new Set<string>()
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+        const taskStartSnapshot = yield* snapshot.track()
         const initialMessages = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
           Effect.provideService(Database.Service, database),
         )
@@ -1283,10 +1290,8 @@ const layer = Layer.effect(
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
             const cfg = yield* config.get()
-            const isVerificationTurn =
-              lastUserMsg?.parts.some(
-                (part) => part.type === "text" && part.synthetic === true && part.text.includes(VERIFICATION_MARKER),
-              ) ?? false
+            const verificationMessages = verificationMessageWindow(msgs, verificationMessageID)
+            const isVerificationTurn = verificationMessageID !== undefined
             const watchdog = cfg.experimental?.small_model_action_watchdog
             const verification = cfg.experimental?.post_edit_verification
             if (isVerificationTurn) verificationTurns++
@@ -1295,7 +1300,7 @@ const layer = Layer.effect(
               sys.environment(model),
               instruction.system().pipe(Effect.orDie),
               sys.mcp(agent, session.permission),
-              MessageV2.toModelMessagesEffect(isVerificationTurn && lastUserMsg ? [lastUserMsg] : msgs, model, {
+              MessageV2.toModelMessagesEffect(verificationMessages ?? msgs, model, {
                 omitSettledReasoning: cfg.experimental?.omit_settled_reasoning === true,
               }),
             ])
@@ -1326,11 +1331,19 @@ const layer = Layer.effect(
                   ? (verification.max_tokens ?? 2048)
                   : watchdog?.enabled === true && !actionSeen
                     ? (watchdog.pre_action_max_tokens ?? 2048)
-                : undefined,
+                    : undefined,
             })
 
             if (handle.metrics.progressActionSeen ?? handle.metrics.meaningfulAction) actionSeen = true
-            if (handle.metrics.filesChanged.length > 0) filesChangedDuringTask = true
+            if (handle.metrics.filesChanged.length > 0) {
+              filesChangedDuringTask = true
+              for (const file of handle.metrics.filesChanged) verificationFilesChanged.add(file)
+            }
+            const turnVerificationBundle = handle.getVerificationBundle
+              ? yield* handle.getVerificationBundle()
+              : { files: handle.metrics.filesChanged, diff: "" }
+            for (const file of turnVerificationBundle.files) verificationFilesChanged.add(file)
+            if (turnVerificationBundle.diff.trim()) verificationDiffs.add(turnVerificationBundle.diff)
 
             if (structured !== undefined) {
               handle.message.structured = structured
@@ -1426,11 +1439,13 @@ const layer = Layer.effect(
               ) {
                 verificationTriggered = true
                 verificationPasses++
-                const verificationBundle = handle.getVerificationBundle
-                  ? yield* handle.getVerificationBundle()
-                  : { files: handle.metrics.filesChanged, diff: "" }
-                const changedFiles = [...new Set([...handle.metrics.filesChanged, ...verificationBundle.files])]
-                const diff = compactVerificationDiff(verificationBundle.diff)
+                const currentSnapshot = taskStartSnapshot ? yield* snapshot.track() : undefined
+                const currentDiff =
+                  taskStartSnapshot && currentSnapshot
+                    ? yield* snapshot.diff(taskStartSnapshot)
+                    : [...verificationDiffs].join("\n")
+                const changedFiles = [...verificationFilesChanged]
+                const diff = compactVerificationDiff(currentDiff)
                 yield* Effect.logInfo("small-model post-edit verification triggered", {
                   sessionID,
                   pass: verificationPasses,
@@ -1438,7 +1453,7 @@ const layer = Layer.effect(
                   changedFiles: changedFiles.length,
                   diffChars: diff.length,
                 })
-                yield* createUserMessage({
+                const verifierMessage = yield* createUserMessage({
                   sessionID,
                   agent: lastUser.agent,
                   model: lastUser.model,
@@ -1450,6 +1465,7 @@ const layer = Layer.effect(
                     },
                   ],
                 }).pipe(Effect.orDie)
+                verificationMessageID = verifierMessage.info.id
                 return "continue" as const
               }
             }
@@ -1763,6 +1779,7 @@ export const node = LayerNode.make({
     EventV2Bridge.node,
     RuntimeFlags.node,
     Database.node,
+    Snapshot.node,
   ],
 })
 

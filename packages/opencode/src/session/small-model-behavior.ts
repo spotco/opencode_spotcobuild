@@ -102,7 +102,14 @@ export function isMcpToolName(toolName: string) {
 export function isProgressAction(toolName: string, toolInput?: unknown) {
   const name = toolName.toLowerCase()
   if (name === "edit" || name === "write" || name === "write_file" || name.includes("apply_patch")) return true
-  if (name === "bash" || name === "shell" || name === "powershell" || name === "pwsh" || name === "cmd" || name === "terminal") {
+  if (
+    name === "bash" ||
+    name === "shell" ||
+    name === "powershell" ||
+    name === "pwsh" ||
+    name === "cmd" ||
+    name === "terminal"
+  ) {
     return isShellProgressCommand(toolInput)
   }
   if (isMcpToolName(name)) return !isInspectionToolName(name)
@@ -120,4 +127,13 @@ export function codeModeMcpToolNames(metadata: unknown) {
 export function compactVerificationDiff(text: string, max = 16_000) {
   const normalized = text.trim()
   return normalized.length <= max ? normalized : `${normalized.slice(0, max)}\n[current diff truncated]`
+}
+
+export function verificationMessageWindow<T extends { info: { id: string } }>(
+  messages: readonly T[],
+  startMessageID: string | undefined,
+) {
+  if (!startMessageID) return undefined
+  const start = messages.findIndex((message) => message.info.id === startMessageID)
+  return start < 0 ? undefined : messages.slice(start)
 }

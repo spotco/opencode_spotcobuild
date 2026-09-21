@@ -8,6 +8,7 @@ import {
   compactVerificationDiff,
   isInspectionToolName,
   isProgressAction,
+  verificationMessageWindow,
 } from "../../src/session/small-model-behavior"
 
 describe("small-model action watchdog", () => {
@@ -80,10 +81,22 @@ describe("small-model post-edit verification", () => {
   })
 
   test("extracts Code Mode child MCP calls and bounds the verification diff", () => {
-    expect(codeModeMcpToolNames({ toolCalls: [{ tool: "brave-devtools_get_page" }, { tool: "brave-devtools_click" }] })).toEqual([
-      "brave-devtools_get_page",
-      "brave-devtools_click",
-    ])
+    expect(
+      codeModeMcpToolNames({ toolCalls: [{ tool: "brave-devtools_get_page" }, { tool: "brave-devtools_click" }] }),
+    ).toEqual(["brave-devtools_get_page", "brave-devtools_click"])
     expect(compactVerificationDiff("x".repeat(10), 5)).toContain("[current diff truncated]")
+  })
+
+  test("keeps the verifier transcript after its synthetic start message", () => {
+    const messages = [
+      { info: { id: "original-user" } },
+      { info: { id: "original-assistant" } },
+      { info: { id: "verification-user" } },
+      { info: { id: "verification-assistant" } },
+      { info: { id: "verification-followup" } },
+    ]
+    expect(verificationMessageWindow(messages, "verification-user")).toEqual(messages.slice(2))
+    expect(verificationMessageWindow(messages, "missing")).toBeUndefined()
+    expect(verificationMessageWindow(messages, undefined)).toBeUndefined()
   })
 })
