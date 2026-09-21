@@ -448,6 +448,7 @@ const layer = Layer.effect(
           },
         ],
         model,
+        maxOutputTokens: cfg.compaction?.summary_max_tokens,
       })
 
       if (result === "compact") {
