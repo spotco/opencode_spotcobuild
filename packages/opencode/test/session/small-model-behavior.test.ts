@@ -4,6 +4,7 @@ import {
   shouldTriggerActionWatchdog,
   shouldTriggerPostEditVerification,
   shouldStopPostEditVerificationTurn,
+  codeModeMcpToolCalls,
   codeModeMcpToolNames,
   compactVerificationDiff,
   isInspectionToolName,
@@ -82,8 +83,24 @@ describe("small-model post-edit verification", () => {
 
   test("extracts Code Mode child MCP calls and bounds the verification diff", () => {
     expect(
-      codeModeMcpToolNames({ toolCalls: [{ tool: "brave-devtools_get_page" }, { tool: "brave-devtools_click" }] }),
-    ).toEqual(["brave-devtools_get_page", "brave-devtools_click"])
+      codeModeMcpToolNames({
+        toolCalls: [
+          { tool: "brave-devtools_get_page", status: "completed" },
+          { tool: "brave-devtools_click", status: "error" },
+        ],
+      }),
+    ).toEqual(["brave-devtools_get_page"])
+    expect(
+      codeModeMcpToolCalls({
+        toolCalls: [
+          { tool: "brave-devtools_get_page", status: "completed" },
+          { tool: "brave-devtools_click", status: "error" },
+        ],
+      }),
+    ).toEqual([
+      { tool: "brave-devtools_get_page", status: "completed", input: undefined },
+      { tool: "brave-devtools_click", status: "error", input: undefined },
+    ])
     expect(compactVerificationDiff("x".repeat(10), 5)).toContain("[current diff truncated]")
   })
 

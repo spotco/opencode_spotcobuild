@@ -117,10 +117,18 @@ export function isProgressAction(toolName: string, toolInput?: unknown) {
 }
 
 export function codeModeMcpToolNames(metadata: unknown) {
+  return codeModeMcpToolCalls(metadata)
+    .filter((call) => call.status === "completed")
+    .map((call) => call.tool)
+}
+
+export function codeModeMcpToolCalls(metadata: unknown) {
   if (!isRecord(metadata) || !Array.isArray(metadata.toolCalls)) return []
   return metadata.toolCalls.flatMap((call) => {
     if (!isRecord(call) || typeof call.tool !== "string") return []
-    return [call.tool]
+    const status = call.status
+    if (status !== "running" && status !== "completed" && status !== "error") return []
+    return [{ tool: call.tool, status, input: call.input }]
   })
 }
 

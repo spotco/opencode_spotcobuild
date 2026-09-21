@@ -25,7 +25,7 @@ import { isRecord } from "@/util/record"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
-import { codeModeMcpToolNames, isMcpToolName, isProgressAction } from "./small-model-behavior"
+import { codeModeMcpToolCalls, isMcpToolName, isProgressAction } from "./small-model-behavior"
 
 const DOOM_LOOP_THRESHOLD = 3
 export type Result = "compact" | "stop" | "continue"
@@ -325,11 +325,20 @@ const layer = Layer.effect(
 
       const recordSuccessfulAction = (input: { name: string; toolInput?: unknown; metadata: Record<string, any> }) => {
         const name = input.name.toLowerCase()
-        const childTools = name === "execute" ? codeModeMcpToolNames(input.metadata) : []
-        const toolNames = childTools.length > 0 ? childTools : [input.name]
-        for (const toolName of toolNames) {
-          if (isMcpToolName(toolName)) ctx.mcpCalls++
-          if (isProgressAction(toolName, input.toolInput)) {
+        const childTools = name === "execute" ? codeModeMcpToolCalls(input.metadata) : []
+        if (childTools.length > 0) {
+          for (const child of childTools) {
+            if (isMcpToolName(child.tool)) ctx.mcpCalls++
+            if (child.status === "completed" && isProgressAction(child.tool, child.input)) {
+              ctx.progressActionSeen = true
+              ctx.meaningfulAction = true
+            } else {
+              ctx.inspectionSeen = true
+            }
+          }
+        } else {
+          if (isMcpToolName(input.name)) ctx.mcpCalls++
+          if (isProgressAction(input.name, input.toolInput)) {
             ctx.progressActionSeen = true
             ctx.meaningfulAction = true
           } else {

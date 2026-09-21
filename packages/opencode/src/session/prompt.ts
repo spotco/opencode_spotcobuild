@@ -1105,7 +1105,11 @@ const layer = Layer.effect(
         const verificationFilesChanged = new Set<string>()
         const verificationDiffs = new Set<string>()
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
-        const taskStartSnapshot = yield* snapshot.track()
+        const taskStartSnapshot = yield* Effect.gen(function* () {
+          const cfg = yield* config.get()
+          if (cfg.experimental?.post_edit_verification?.enabled !== true) return undefined
+          return yield* snapshot.track()
+        })
         const initialMessages = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
           Effect.provideService(Database.Service, database),
         )
@@ -1439,11 +1443,9 @@ const layer = Layer.effect(
               ) {
                 verificationTriggered = true
                 verificationPasses++
-                const currentSnapshot = taskStartSnapshot ? yield* snapshot.track() : undefined
-                const currentDiff =
-                  taskStartSnapshot && currentSnapshot
-                    ? yield* snapshot.diff(taskStartSnapshot)
-                    : [...verificationDiffs].join("\n")
+                const currentDiff = taskStartSnapshot
+                  ? yield* snapshot.diff(taskStartSnapshot)
+                  : [...verificationDiffs].join("\n")
                 const changedFiles = [...verificationFilesChanged]
                 const diff = compactVerificationDiff(currentDiff)
                 yield* Effect.logInfo("small-model post-edit verification triggered", {
