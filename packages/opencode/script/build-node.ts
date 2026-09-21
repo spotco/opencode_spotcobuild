@@ -22,6 +22,7 @@ await Bun.build({
   define: {
     OPENCODE_MODELS_DEV: generated.modelsData,
     OPENCODE_VERSION: `'${Script.version}'`,
+    OPENCODE_SPOTCOBUILD_MARK: "'spotcobuild-v1.18.31-patched'",
     OPENCODE_CHANNEL: `'${Script.channel}'`,
   },
   files: {
