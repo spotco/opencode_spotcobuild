@@ -1,6 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+import { readFileSync } from "node:fs"
 import { Session } from "./session"
 import { SessionID, MessageID, PartID } from "./schema"
 import { Provider } from "@/provider/provider"
@@ -31,6 +32,9 @@ const TOOL_OUTPUT_MAX_CHARS = 2_000
 const PRUNE_PROTECTED_TOOLS = ["skill"]
 const MIN_PRESERVE_RECENT_TOKENS = 2_000
 const MAX_PRESERVE_RECENT_TOKENS = 15_000
+const compactionPromptTemplate = process.env.OPENCODE_SPOTCOBUILD_COMPACTION_PROMPT_FILE
+  ? readFileSync(process.env.OPENCODE_SPOTCOBUILD_COMPACTION_PROMPT_FILE, "utf8").trim()
+  : undefined
 type Turn = {
   start: number
   end: number
@@ -392,6 +396,7 @@ const layer = Layer.effect(
             previousSummary,
             context: [conversation],
             checkpointStyle: cfg.compaction?.checkpoint_style ?? "summary",
+            promptTemplate: compactionPromptTemplate,
           }),
           ...compacting.context,
         ]

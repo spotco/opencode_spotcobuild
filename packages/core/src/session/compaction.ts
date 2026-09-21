@@ -215,14 +215,41 @@ const templateFor = (style: CheckpointStyle) =>
     ? { template: CONTINUATION_TEMPLATE, update: CONTINUATION_UPDATE_INSTRUCTIONS }
     : { template: SUMMARY_TEMPLATE, update: SUMMARY_UPDATE_INSTRUCTIONS }
 
+const section = (source: string, name: string) => {
+  const match = source.match(new RegExp(`^\\[${name}\\]\\r?\\n(.*?)\\r?\\n\\[/${name}\\](?:\\r?\\n|$)`, "ms"))
+  if (!match) throw new Error(`Missing compaction prompt section: [${name}]`)
+  const value = match[1].trim()
+  if (!value) throw new Error(`Empty compaction prompt section: [${name}]`)
+  return value
+}
+
+const renderExternalPrompt = (input: {
+  readonly source: string
+  readonly previousSummary?: string
+  readonly conversation: string
+}) => {
+  const name = input.previousSummary ? "request-update" : "request-new"
+  return section(input.source, name)
+    .replaceAll("{{CONVERSATION}}", input.conversation)
+    .replaceAll("{{PRIOR_SUMMARY}}", input.previousSummary ?? "")
+}
+
 export const buildPrompt = (input: {
   readonly previousSummary?: string
   readonly context: readonly string[]
   readonly checkpointStyle?: CheckpointStyle
+  readonly promptTemplate?: string
 }) => {
   const style = input.checkpointStyle ?? "summary"
   const { template, update } = templateFor(style)
   const conversation = `Here is the conversation so far:\n\n<conversation>\n${input.context.join("\n\n")}\n</conversation>`
+  if (input.promptTemplate && style === "continuation") {
+    return renderExternalPrompt({
+      source: input.promptTemplate,
+      previousSummary: input.previousSummary,
+      conversation,
+    })
+  }
   if (!input.previousSummary)
     return [
       conversation,

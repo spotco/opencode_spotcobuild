@@ -16,6 +16,7 @@ import type { Plugin } from "@/plugin"
 import { mergeDeep } from "remeda"
 
 const USER_AGENT = `opencode/${InstallationVersion}`
+const RUNTIME_SYSTEM_MARKER = "{{SPOTCOBUILD_RUNTIME_SYSTEM}}"
 
 type PrepareInput = {
   readonly user: SessionV1.User
@@ -56,14 +57,14 @@ const mergeOptions = (target: Record<string, any>, source: Record<string, any> |
 
 export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: PrepareInput) {
   const isOpenaiOauth = input.provider.id === "openai" && input.auth?.type === "oauth"
+  const runtimeSystem = [...input.system, ...(input.user.system ? [input.user.system] : [])].filter((x) => x).join("\n")
+  const prompt = input.agent.prompt
+    ? input.agent.prompt.includes(RUNTIME_SYSTEM_MARKER)
+      ? input.agent.prompt.replace(RUNTIME_SYSTEM_MARKER, () => runtimeSystem)
+      : [input.agent.prompt, runtimeSystem].filter((x) => x).join("\n")
+    : [...SystemPrompt.provider(input.model), runtimeSystem].filter((x) => x).join("\n")
   const system = [
-    [
-      ...(input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)),
-      ...input.system,
-      ...(input.user.system ? [input.user.system] : []),
-    ]
-      .filter((x) => x)
-      .join("\n"),
+    prompt,
   ]
 
   const header = system[0]
