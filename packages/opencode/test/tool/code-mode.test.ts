@@ -487,6 +487,43 @@ describe("code mode execute", () => {
     expect(calls).toBe(2)
   })
 
+  test("does not block the same arguments after a stateful MCP error is fixed", async () => {
+    let selected = false
+    let actionCalls = 0
+    const tool = await build({
+      browser_action: mcpTool("action", () => {
+        actionCalls += 1
+        if (!selected) return { isError: true, content: [{ type: "text", text: "page must be selected" }] }
+        return { content: [{ type: "text", text: "ok" }] }
+      }),
+      browser_select: mcpTool("select", () => {
+        selected = true
+        return { content: [{ type: "text", text: "selected" }] }
+      }),
+    })
+
+    const out = await Effect.runPromise(
+      tool.execute(
+        {
+          code: `
+            let first = ""
+            try { await tools.browser.action({ pageId: 8 }) } catch (e) { first = e.message }
+            await tools.browser.select({})
+            const second = (await tools.browser.action({ pageId: 8 })).text
+            return { first, second }
+          `,
+        },
+        ctx,
+      ),
+    )
+
+    const result = JSON.parse(out.output)
+    expect(result.first).toContain("page must be selected")
+    expect(result.first).not.toContain("Live signature:")
+    expect(result.second).toBe("ok")
+    expect(actionCalls).toBe(2)
+  })
+
   test("asks permission before each child tool call", async () => {
     const asked: unknown[] = []
     const permissionCtx: Tool.Context = { ...ctx, ask: (req) => Effect.sync(() => void asked.push(req)) }
