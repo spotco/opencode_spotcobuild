@@ -75,7 +75,14 @@ describe("small-model post-edit verification", () => {
 
   test("keeps inspection separate from successful progress actions", () => {
     expect(isInspectionToolName("read_file")).toBe(true)
+    expect(isInspectionToolName("brave-devtools.list_network_requests")).toBe(true)
+    expect(isInspectionToolName("brave-devtools.get_network_request")).toBe(true)
+    expect(isInspectionToolName("brave-devtools_get_network_request")).toBe(true)
+    expect(isInspectionToolName("brave-devtools.click")).toBe(false)
     expect(isProgressAction("read_file", { filePath: "src/app.ts" })).toBe(false)
+    expect(isProgressAction("brave-devtools.get_network_request")).toBe(false)
+    expect(isProgressAction("brave-devtools_get_network_request")).toBe(false)
+    expect(isProgressAction("brave-devtools.click")).toBe(true)
     expect(isProgressAction("edit", { filePath: "src/app.ts" })).toBe(true)
     expect(isProgressAction("shell", { command: "git status --short" })).toBe(false)
     expect(isProgressAction("shell", { command: "npm test" })).toBe(true)

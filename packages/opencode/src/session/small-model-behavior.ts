@@ -62,7 +62,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function isInspectionToolName(toolName: string) {
   const name = toolName.toLowerCase()
-  return [
+  const localName = (() => {
+    const dot = name.lastIndexOf(".")
+    const candidate = dot >= 0 ? name.slice(dot + 1) : name
+    const underscorePrefix = candidate.match(/^[^_]+_(?=(?:get_|list_|read_|search_|inspect_|snapshot))/)
+    return underscorePrefix ? candidate.slice(underscorePrefix[0].length) : candidate
+  })()
+  const markers = [
     "read",
     "read_file",
     "cat",
@@ -82,7 +88,13 @@ export function isInspectionToolName(toolName: string) {
     "diff",
     "log",
     "pwd",
-  ].some((marker) => name === marker || name.endsWith(`_${marker}`) || name.includes(`_${marker}_`))
+  ]
+  const matchesMarker = (candidate: string) =>
+    markers.some((marker) =>
+      [candidate === marker, candidate.endsWith(`_${marker}`), candidate.includes(`_${marker}_`)].some(Boolean),
+    )
+  const readOnlyVerb = /(?:^|[._])(?:get_|list_|read_|search_|inspect_|snapshot)/
+  return matchesMarker(localName) || readOnlyVerb.test(name)
 }
 
 function isShellProgressCommand(toolInput: unknown) {
