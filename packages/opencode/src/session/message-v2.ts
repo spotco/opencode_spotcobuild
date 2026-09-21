@@ -52,6 +52,32 @@ function truncateToolOutput(text: string, maxChars?: number) {
   return `${text.slice(0, maxChars)}\n[Tool output truncated for compaction: omitted ${omitted} chars]`
 }
 
+const FULL_OUTPUT_SAVED_RE = /Full output saved to:\s*(.+)/
+
+/** Recover a truncation-disk path from tool metadata or stored output text. */
+export function toolOutputRetrievalPath(state: {
+  output?: string
+  metadata?: Record<string, unknown>
+}): string | undefined {
+  const fromMeta = state.metadata?.outputPath
+  if (typeof fromMeta === "string" && fromMeta.trim()) return fromMeta.trim()
+  const output = state.output
+  if (typeof output !== "string" || !output) return undefined
+  const match = output.match(FULL_OUTPUT_SAVED_RE)
+  const path = match?.[1]?.trim()
+  return path || undefined
+}
+
+/** Model-visible placeholder when prune has compacted a completed tool result. */
+export function compactedToolOutputText(state: {
+  output?: string
+  metadata?: Record<string, unknown>
+}): string {
+  const path = toolOutputRetrievalPath(state)
+  if (path) return `[old tool output cleared; full output: ${path}]`
+  return "[Old tool result content cleared]"
+}
+
 export const Event = {
   Updated: SessionV1.Event.MessageUpdated,
   Removed: SessionV1.Event.MessageRemoved,
@@ -131,7 +157,7 @@ function providerMeta(metadata: Record<string, any> | undefined) {
 export const toModelMessagesEffect = Effect.fnUntraced(function* (
   input: WithParts[],
   model: Provider.Model,
-  options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
+  options?: { stripMedia?: boolean; toolOutputMaxChars?: number; omitSettledReasoning?: boolean },
 ) {
   const result: UIMessage[] = []
   const toolNames = new Set<string>()
@@ -291,7 +317,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           toolNames.add(part.tool)
           if (part.state.status === "completed") {
             const outputText = part.state.time.compacted
-              ? "[Old tool result content cleared]"
+              ? compactedToolOutputText(part.state)
               : truncateToolOutput(part.state.output, options?.toolOutputMaxChars)
             const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
 
@@ -360,6 +386,10 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
             })
         }
         if (part.type === "reasoning") {
+          // Optional: drop settled historical reasoning from model replay when
+          // experimental.omit_settled_reasoning is enabled. Keep unfinished /
+          // current-turn reasoning (provider signatures / live thinking).
+          if (options?.omitSettledReasoning && msg.info.finish) continue
           if (differentModel) {
             if (part.text.trim().length > 0)
               assistantMessage.parts.push({
@@ -417,7 +447,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 export function toModelMessages(
   input: WithParts[],
   model: Provider.Model,
-  options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
+  options?: { stripMedia?: boolean; toolOutputMaxChars?: number; omitSettledReasoning?: boolean },
 ): Promise<ModelMessage[]> {
   return Effect.runPromise(toModelMessagesEffect(input, model, options))
 }

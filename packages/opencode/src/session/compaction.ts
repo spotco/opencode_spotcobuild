@@ -66,7 +66,7 @@ const serialize = (message: SessionV1.WithParts) => {
   return message.parts
     .flatMap((part) => {
       if (part.type === "text") return part.text ? [`[Assistant]: ${part.text}`] : []
-      if (part.type === "reasoning") return part.text ? [`[Assistant reasoning]: ${part.text}`] : []
+      if (part.type === "reasoning") return []
       if (part.type !== "tool") return []
       const call = `[Assistant tool call]: ${part.tool}(${JSON.stringify(part.state.input)})`
       if (part.state.status === "completed") {
@@ -74,7 +74,12 @@ const serialize = (message: SessionV1.WithParts) => {
           (item) => `[Attached ${item.mime}: ${item.filename ?? "file"}]`,
         )
         const output = part.state.time.compacted
-          ? "[Old tool result content cleared]"
+          ? (() => {
+              const path = MessageV2.toolOutputRetrievalPath(part.state)
+              return path
+                ? `[old tool output cleared; full output: ${path}]`
+                : "[tool output cleared; full result retained on disk if truncated earlier]"
+            })()
           : truncate([part.state.output, ...attachments].join("\n"))
         return [call, `[Tool result]: ${output}`]
       }
@@ -268,11 +273,13 @@ const layer = Layer.effect(
       }
     })
 
-    // goes backwards through parts until there are PRUNE_PROTECT tokens worth of tool
+    // goes backwards through parts until there are pruneProtect tokens worth of tool
     // calls, then erases output of older tool calls to free context space
     const prune = Effect.fn("SessionCompaction.prune")(function* (input: { sessionID: SessionID }) {
       const cfg = yield* config.get()
       if (!cfg.compaction?.prune) return
+      const pruneProtect = cfg.compaction.prune_protect_tokens ?? PRUNE_PROTECT
+      const pruneMinimum = cfg.compaction.prune_minimum_tokens ?? PRUNE_MINIMUM
       yield* Effect.logInfo("pruning")
 
       const msgs = yield* session
@@ -298,14 +305,14 @@ const layer = Layer.effect(
           if (part.state.time.compacted) break loop
           const estimate = Token.estimate(part.state.output)
           total += estimate
-          if (total <= PRUNE_PROTECT) continue
+          if (total <= pruneProtect) continue
           pruned += estimate
           toPrune.push(part)
         }
       }
 
       yield* Effect.logInfo("found", { pruned, total })
-      if (pruned > PRUNE_MINIMUM) {
+      if (pruned > pruneMinimum) {
         for (const part of toPrune) {
           if (part.state.status === "completed") {
             part.state.time.compacted = Date.now()
@@ -384,6 +391,7 @@ const layer = Layer.effect(
           buildPrompt({
             previousSummary,
             context: [conversation],
+            checkpointStyle: cfg.compaction?.checkpoint_style ?? "summary",
           }),
           ...compacting.context,
         ]
@@ -445,6 +453,7 @@ const layer = Layer.effect(
           },
         ],
         model,
+        maxOutputTokens: cfg.compaction?.summary_max_tokens,
       })
 
       if (result === "compact") {

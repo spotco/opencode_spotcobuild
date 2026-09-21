@@ -164,6 +164,21 @@ export const Info = Schema.Struct({
       reserved: Schema.optional(NonNegativeInt).annotate({
         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
       }),
+      summary_max_tokens: Schema.optional(PositiveInt).annotate({
+        description: "Maximum tokens for compaction summary generation (default: 4096 when unset)",
+      }),
+      prune_protect_tokens: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Protected recent tool-output token budget during prune; older completed outputs beyond this may be cleared (default: 40000 when unset)",
+      }),
+      prune_minimum_tokens: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Minimum prunable tool-output tokens that must accumulate before prune writes compacted markers (default: 20000 when unset)",
+      }),
+      checkpoint_style: Schema.optional(Schema.Literals(["summary", "continuation"])).annotate({
+        description:
+          'Compaction checkpoint template style. "summary" is the upstream Objective/Completed format (default). "continuation" uses Goal/Durable/Active/Next/Working Files.',
+      }),
     }),
   ),
   experimental: Schema.optional(
@@ -185,6 +200,18 @@ export const Info = Schema.Struct({
       policies: Schema.optional(Schema.mutable(Schema.Array(ConfigExperimental.Policy))).annotate({
         description: "Policy statements applied to supported resources, such as provider access",
       }),
+      omit_settled_reasoning: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "When true, omit finished-turn assistant reasoning from live model replay (default: false). Unfinished/current-turn reasoning is always kept.",
+      }),
+      codemode: Schema.optional(
+        Schema.Struct({
+          catalog_budget: Schema.optional(NonNegativeInt).annotate({
+            description:
+              "Estimated-token budget for Code Mode MCP tool catalog inlining (default: 2000 when unset)",
+          }),
+        }),
+      ),
     }),
   ),
 }).annotate({ identifier: "Config" })

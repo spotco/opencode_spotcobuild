@@ -399,6 +399,35 @@ Recent work
     ])
   })
 
+  test("omits finished reasoning only when omitSettledReasoning is enabled", () => {
+    const assistant = SessionMessage.Assistant.make({
+      id: id("assistant-settled"),
+      type: "assistant",
+      agent: "build",
+      model: { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider") },
+      content: [
+        SessionMessage.AssistantReasoning.make({
+          type: "reasoning",
+          id: "reasoning-settled",
+          text: "settled",
+          providerMetadata: { anthropic: { signature: "sig" } },
+        }),
+        SessionMessage.AssistantText.make({ type: "text", id: "text-1", text: "done" }),
+      ],
+      finish: "stop",
+      time: { created, completed: created },
+    })
+
+    const kept = toLLMMessages([assistant], model)
+    expect(kept[0]?.content).toEqual([
+      { type: "reasoning", text: "settled", providerMetadata: { anthropic: { signature: "sig" } } },
+      { type: "text", text: "done" },
+    ])
+
+    const omitted = toLLMMessages([assistant], model, { omitSettledReasoning: true })
+    expect(omitted[0]?.content).toEqual([{ type: "text", text: "done" }])
+  })
+
   test("drops provider-native continuation metadata after a model switch", () => {
     const messages = toLLMMessages(
       [

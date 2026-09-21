@@ -15,4 +15,8 @@ export class Policy extends Schema.Class<Policy>("ConfigV2.Experimental.Policy")
 
 export class Experimental extends Schema.Class<Experimental>("ConfigV2.Experimental")({
   policies: Policy.pipe(Schema.Array, Schema.optional),
+  omit_settled_reasoning: Schema.Boolean.pipe(Schema.optional).annotate({
+    description:
+      "When true, omit finished-turn assistant reasoning from live model replay (default: false). Unfinished/current-turn reasoning is always kept.",
+  }),
 }) {}
