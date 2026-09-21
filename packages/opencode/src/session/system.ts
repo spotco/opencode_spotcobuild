@@ -68,8 +68,13 @@ const layer = Layer.effect(
     return Service.of({
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
         const ctx = yield* InstanceState.context
+        // SpotcoBuild: v1.18.31 can surface undefined holes from Reference.list();
+        // sorting those throws TypeError on a.name and aborts the prompt loop.
         const references = yield* Effect.gen(function* () {
-          return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
+          return (yield* (yield* Reference.Service).list()).filter(
+            (reference): reference is NonNullable<typeof reference> =>
+              reference != null && typeof reference.name === "string" && reference.description !== undefined,
+          )
         }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
         return [
           [
