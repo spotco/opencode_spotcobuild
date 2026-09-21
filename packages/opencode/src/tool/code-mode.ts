@@ -89,7 +89,7 @@ class McpValidationError extends Error {
 }
 
 const isMcpValidationMessage = (message: string) =>
-  /(?:invalid\s+(?:argument|input|parameter|request)|validation\s+(?:error|failed)|schema\s+(?:error|validation)|missing\s+required|unknown\s+(?:field|property|argument|parameter)|additional\s+propert|unsupported\s+(?:field|argument|parameter)|must\s+(?:be|contain|include)|expected\s+.+\s+(?:got|received))/i.test(
+  /(?:invalid\s+(?:argument|input|parameter)|validation\s+(?:error|failed)|schema\s+(?:error|validation)|missing\s+required(?:\s+(?:argument|input|parameter|field|property))?|unknown\s+(?:field|property|argument|parameter)|additional\s+propert|unsupported\s+(?:field|argument|parameter)|expected\s+.+\s+(?:got|received))/i.test(
     message,
   )
 
