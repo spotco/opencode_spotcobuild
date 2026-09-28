@@ -210,6 +210,7 @@ export class RunFooter implements FooterApi {
   private noticeTimeout: NodeJS.Timeout | undefined
   private noticeRestoreStatus = ""
   private statusVersion = 0
+  private lastSpeed = ""
   private requestExitHandler: (() => boolean) | undefined
   private scrollback: RunScrollbackStream
   private themes: RunTheme[]
@@ -388,6 +389,22 @@ export class RunFooter implements FooterApi {
   }
 
   public event(next: FooterEvent): void {
+    if (next.type === "llama.activity") {
+      if (next.speed) {
+        this.lastSpeed = next.speed
+      }
+      if (
+        !next.status ||
+        this.isGone ||
+        this.state().phase !== "running" ||
+        this.state().status === next.status
+      ) {
+        return
+      }
+      this.patch({ status: next.status })
+      return
+    }
+
     if (next.type === "turn.duration") {
       const current = this.currentModel()
       this.flush()
@@ -397,6 +414,7 @@ export class RunFooter implements FooterApi {
             agent: this.options.agentLabel,
             model: current ? modelInfo(this.providers(), current).model : this.state().model,
             duration: next.duration,
+            speed: this.lastSpeed || undefined,
           }),
         )
         .catch((error) => {
@@ -444,6 +462,10 @@ export class RunFooter implements FooterApi {
 
       this.setQueuedPrompts(next.prompts)
       return
+    }
+
+    if (next.type === "turn.idle") {
+      this.lastSpeed = ""
     }
 
     const patch = eventPatch(next)

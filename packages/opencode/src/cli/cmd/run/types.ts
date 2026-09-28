@@ -101,6 +101,7 @@ export type TurnSummary = {
   agent: string
   model: string
   duration: string
+  speed?: string
 }
 
 export type ScrollbackOptions = {
@@ -266,6 +267,11 @@ export type FooterEvent =
   | {
       type: "turn.duration"
       duration: string
+    }
+  | {
+      type: "llama.activity"
+      status: string
+      speed: string
     }
   | {
       type: "stream.patch"

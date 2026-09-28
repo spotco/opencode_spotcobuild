@@ -42,6 +42,14 @@ import {
   SUBAGENT_CALL_BOOTSTRAP_LIMIT,
   type SubagentData,
 } from "./subagent-data"
+import {
+  fetchLlamaActivity,
+  formatLlamaActivity,
+  formatLlamaSpeed,
+  llamaActivityEndpoint,
+  openLlamaPart,
+  type LlamaActivity,
+} from "./llama-activity"
 import { traceFooterOutput, writeSessionOutput } from "./stream"
 import type {
   FooterApi,
@@ -115,6 +123,7 @@ type State = {
   data: SessionData
   subagent: SubagentData
   wait?: Wait
+  model?: RunInput["model"]
   tick: number
   fault?: unknown
   footerView: FooterView
@@ -864,6 +873,56 @@ function createLayer(input: StreamInput) {
           yield* complete(next, true)
         })
 
+        const watchLlama = Effect.fn("RunStreamTransport.llamaActivity")(function* () {
+          let endpoint: string | undefined
+          let fetchedAt = 0
+          let snapshot: LlamaActivity | undefined
+          while (!closed && !abort.signal.aborted && !input.footer.isClosed) {
+            yield* Effect.sleep("500 millis")
+            if (closed || abort.signal.aborted || input.footer.isClosed || !state.wait) {
+              snapshot = undefined
+              continue
+            }
+
+            const nextEndpoint = llamaActivityEndpoint(input.providers?.(), state.model)
+            if (!nextEndpoint) {
+              continue
+            }
+            if (nextEndpoint !== endpoint) {
+              endpoint = nextEndpoint
+              snapshot = undefined
+            }
+
+            const fetched = yield* Effect.promise(() => fetchLlamaActivity(endpoint!))
+            if (closed || abort.signal.aborted || input.footer.isClosed || !state.wait) {
+              continue
+            }
+            if (fetched) {
+              snapshot = fetched
+              fetchedAt = Date.now()
+            }
+            if (!snapshot) {
+              continue
+            }
+
+            const view = formatLlamaActivity({
+              activity: snapshot,
+              fetchedAt,
+              part: openLlamaPart(state.data),
+            })
+            const speed = view?.speed || formatLlamaSpeed(snapshot.outputTokensPerSecond)
+            if (!view && !speed) {
+              continue
+            }
+
+            input.footer.event({
+              type: "llama.activity",
+              status: view?.status ?? "",
+              speed,
+            })
+          }
+        })
+
         const poll = Effect.fn("RunStreamTransport.poll")(function* (next: Wait, signal: AbortSignal) {
           while (state.wait === next && !signal.aborted && !input.footer.isClosed && !closed) {
             yield* Effect.sleep("250 millis")
@@ -1182,9 +1241,11 @@ function createLayer(input: StreamInput) {
         )
 
         yield* Scope.provide(scope)(watch().pipe(Effect.forkScoped))
+        yield* Scope.provide(scope)(watchLlama().pipe(Effect.forkScoped))
         yield* bootstrap()
 
         const runPromptTurn = Effect.fn("RunStreamTransport.runPromptTurn")(function* (next: SessionTurnInput) {
+          state.model = next.model
           if (closed || next.signal?.aborted || input.footer.isClosed) {
             return
           }

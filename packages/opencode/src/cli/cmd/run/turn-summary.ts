@@ -6,17 +6,20 @@ export function turnSummaryCommit(input: {
   agent: string
   model: string
   duration: string
+  speed?: string
   messageID?: string
 }): StreamCommit {
+  const speed = input.speed ? ` · ${input.speed}` : ""
   return {
     kind: "system",
-    text: `▣ ${input.agent} · ${input.model} · ${input.duration}`,
+    text: `▣ ${input.agent} · ${input.model} · ${input.duration}${speed}`,
     phase: "final",
     source: "system",
     summary: {
       agent: input.agent,
       model: input.model,
       duration: input.duration,
+      speed: input.speed,
     },
     messageID: input.messageID,
   }

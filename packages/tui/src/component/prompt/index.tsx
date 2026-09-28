@@ -13,6 +13,7 @@ import { createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, S
 import { registerOpencodeSpinner } from "../register-spinner"
 import path from "path"
 import { fileURLToPath } from "url"
+import { llamaLiveStatus, useLlamaActivityWatch } from "../../context/llama-activity"
 import { useLocal } from "../../context/local"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { tint, useTheme } from "../../context/theme"
@@ -147,6 +148,7 @@ export function Prompt(props: PromptProps) {
 
   const leader = useLeaderActive()
   const local = useLocal()
+  useLlamaActivityWatch(() => props.sessionID)
   const args = useArgs()
   const paths = useTuiPaths()
   const location = useLocation()
@@ -1525,6 +1527,13 @@ export function Prompt(props: PromptProps) {
                       <spinner color={spinnerDef().color} frames={spinnerDef().frames} interval={40} />
                     </Show>
                   </box>
+                  <Show when={llamaLiveStatus()?.status}>
+                    {(text) => (
+                      <text fg={theme.text} wrapMode="none">
+                        {text()}
+                      </text>
+                    )}
+                  </Show>
                   <box flexDirection="row" gap={1} flexShrink={0}>
                     {(() => {
                       const retry = createMemo(() => {

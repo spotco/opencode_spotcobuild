@@ -72,6 +72,7 @@ import { sessionEpilogue } from "../../util/presentation"
 import { setPreLayoutSiblingMargin } from "../../util/layout"
 import { useTuiConfig } from "../../config"
 import { useClipboard } from "../../context/clipboard"
+import { llamaLiveStatus, llamaMessageSpeed } from "../../context/llama-activity"
 import { nextThinkingMode, reasoningSummary, useThinkingMode, type ThinkingMode } from "../../context/thinking"
 import { getScrollAcceleration } from "../../util/scroll"
 import { collapseToolOutput } from "../../util/collapse-tool-output"
@@ -1563,6 +1564,17 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
               <span style={{ fg: theme.textMuted }}> · {model()}</span>
               <Show when={duration()}>
                 <span style={{ fg: theme.textMuted }}> · {Locale.duration(duration())}</span>
+              </Show>
+              <Show
+                when={
+                  props.last && !props.message.time.completed
+                    ? llamaLiveStatus()?.status
+                    : props.message.time.completed
+                      ? llamaMessageSpeed(props.message.id)
+                      : undefined
+                }
+              >
+                {(detail) => <span style={{ fg: theme.textMuted }}> · {detail()}</span>}
               </Show>
               <Show when={props.message.error?.name === "MessageAbortedError"}>
                 <span style={{ fg: theme.textMuted }}> · interrupted</span>
